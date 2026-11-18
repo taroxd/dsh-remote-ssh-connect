@@ -10,13 +10,18 @@ import { PassThrough } from 'node:stream'
 import {
   RemoteConnectionManager,
   acquireLocalPort,
+  apply as applyHostPlugin,
   buildKillRemotePortScript,
   buildRemoteBootstrapScript,
+  classifyInstallSource,
+  comparePluginVersions,
   hostBlockMatches,
   isConcreteHostPattern,
+  listLocalPlugins,
   loadSshConfigHosts,
   normalizeHostConfig,
   openUrlInDefaultBrowser,
+  packLocalPluginDirectory,
   parseSshConfigText,
   resolveHostsFromBlocks,
   validateHostConfigInput,
@@ -166,10 +171,12 @@ Match host 203.0.113.*
     assert.equal(script.includes('LOCAL_PORT=54321'), true)
     assert.equal(supervisorJs.includes('--from-default-profile'), true)
     assert.equal(script.includes('MAX_VERSIONS=3'), true)
-    assert.equal(sshCommand.startsWith("sh -c 'eval "), true)
+    assert.equal(script.includes('bash -lic'), true)
+    assert.equal(script.includes('.bashrc'), true)
+    assert.equal(sshCommand.startsWith('mkdir -p ~/.dsh-remote-connect && printf %s '), true)
 
     const killCmd = buildKillRemotePortScript(3080)
-    assert.equal(killCmd.startsWith("sh -c 'eval "), true)
+    assert.equal(killCmd.startsWith('mkdir -p ~/.dsh-remote-connect && printf %s '), true)
   }
 
   // 6. Browser opener & fallback URL support
@@ -396,6 +403,361 @@ Match host 203.0.113.*
       }
     } finally {
       await rm(tmpRoot, { recursive: true, force: true })
+    }
+  }
+
+  // 9. Auth cancellation immediately terminates the SSH connection
+  {
+    const tmpRoot = await mkdtemp(join(tmpdir(), 'dsh-rc-cancel-test-'))
+    try {
+      const sshConfigPath = join(tmpRoot, 'config')
+      await writeFile(
+        sshConfigPath,
+        [
+          'Host cancel-node',
+          '  HostName 198.51.100.55',
+          '  User admin',
+        ].join('\n'),
+        'utf8',
+      )
+
+      let sshKilled = false
+      const mockSpawn = (_cmd, _args, opts) => {
+        const child = new EventEmitter()
+        child.stdin = new PassThrough()
+        child.stdout = new PassThrough()
+        child.stderr = new PassThrough()
+        child.exitCode = null
+        child.killed = false
+        child.kill = () => {
+          sshKilled = true
+          child.killed = true
+          child.exitCode = 1
+          child.emit('close', 1)
+        }
+        child.stdin.on('end', () => {
+          sshKilled = true
+          child.killed = true
+          child.exitCode = 0
+          child.emit('close', 0)
+        })
+
+        ;(async () => {
+          await fetch(opts.env.DSH_RC_ASKPASS_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ token: opts.env.DSH_RC_ASKPASS_TOKEN, prompt: 'Password:' }),
+          }).catch(() => {})
+        })()
+
+        return child
+      }
+
+      const manager = new RemoteConnectionManager({
+        sshConfigPath,
+        dshVersion: '0.2.2-rc.3',
+        spawnProcess: mockSpawn,
+      })
+
+      await manager.init()
+      try {
+        await manager.connectHost('cancel-node', { waitForReady: false })
+        await new Promise((r) => setTimeout(r, 40))
+
+        let st = await manager.getHostStatus('cancel-node')
+        assert.equal(st.status, 'connecting')
+        assert.equal(st.phase, 'awaiting_auth')
+        assert.ok(st.authPrompt)
+
+        // Cancel auth -> must immediately terminate SSH connection and return to disconnected
+        const cancelRes = await manager.cancelAuth('cancel-node', { promptId: st.authPrompt.id })
+        assert.equal(cancelRes.ok, true)
+        assert.equal(cancelRes.disconnected, true)
+        assert.equal(sshKilled, true)
+
+        st = await manager.getHostStatus('cancel-node')
+        assert.equal(st.status, 'disconnected')
+        assert.equal(st.authPrompt, null)
+      } finally {
+        await manager.dispose()
+      }
+    } finally {
+      await rm(tmpRoot, { recursive: true, force: true })
+    }
+  }
+
+  // 10. Plugin source classification, SemVer comparison, local plugin discovery, and remote sync (<= vs > version confirmation)
+  {
+    assert.equal(comparePluginVersions('1.0.0', '1.0.0'), 0)
+    assert.equal(comparePluginVersions('1.2.0', '1.1.9'), 1)
+    assert.equal(comparePluginVersions('1.0.0', '1.0.1'), -1)
+    assert.equal(comparePluginVersions('1.0.0', '1.0.0-rc.1'), 1)
+    assert.equal(comparePluginVersions('1.0.0-rc.2', '1.0.0-rc.1'), 1)
+
+    const npmSrc = classifyInstallSource('@scope/demo-plugin', '^1.2.3', '/tmp/profile')
+    assert.equal(npmSrc.sourceKind, 'npm')
+
+    const ghSrc = classifyInstallSource('gh-plugin', 'github:example-org/gh-plugin#main', '/tmp/profile')
+    assert.equal(ghSrc.sourceKind, 'github')
+    assert.equal(ghSrc.installSpec, 'github:example-org/gh-plugin#main')
+
+    const localDirSrc = classifyInstallSource('local-dir-plugin', 'link:/tmp/my-local-plugin', '/tmp/profile')
+    assert.equal(localDirSrc.sourceKind, 'local')
+    assert.equal(localDirSrc.localSubkind, 'directory')
+
+    const localTgzSrc = classifyInstallSource('local-tgz-plugin', 'file:/tmp/my-plugin-1.0.0.tgz', '/tmp/profile')
+    assert.equal(localTgzSrc.sourceKind, 'local')
+    assert.equal(localTgzSrc.localSubkind, 'tarball')
+
+    // Set up a mock local profile with 3 plugins (npm, github, local) and test syncPluginToHost
+    const tmpRoot = await mkdtemp(join(tmpdir(), 'dsh-rc-pluginsync-test-'))
+    try {
+      const sshConfigPath = join(tmpRoot, 'ssh_config')
+      await writeFile(
+        sshConfigPath,
+        [
+          'Host sync-box',
+          '  HostName 198.51.100.77',
+          '  User builder',
+        ].join('\n'),
+        'utf8',
+      )
+
+      const profileDir = join(tmpRoot, 'profile')
+      const localPluginDir = join(tmpRoot, 'my-local-bundle')
+      const npmPluginDir = join(profileDir, 'node_modules', 'demo-npm-bundle')
+      const ghPluginDir = join(profileDir, 'node_modules', 'demo-gh-bundle')
+
+      await mkdir(join(localPluginDir, 'locale'), { recursive: true })
+      await mkdir(npmPluginDir, { recursive: true })
+      await mkdir(ghPluginDir, { recursive: true })
+
+      await writeFile(
+        join(localPluginDir, 'package.json'),
+        JSON.stringify({
+          name: 'my-local-bundle',
+          version: '1.2.0',
+          dsh: { bundle: { patch: './cordis.patch.yml' } },
+        }),
+        'utf8',
+      )
+      await writeFile(join(localPluginDir, 'cordis.patch.yml'), '[]\n', 'utf8')
+      await writeFile(
+        join(localPluginDir, 'locale', 'zh.json'),
+        JSON.stringify({ meta: { title: '本地测试插件', description: '测试描述' } }),
+        'utf8',
+      )
+
+      await writeFile(
+        join(npmPluginDir, 'package.json'),
+        JSON.stringify({
+          name: 'demo-npm-bundle',
+          version: '2.0.0',
+          dsh: { bundle: { patch: './cordis.patch.yml' } },
+        }),
+        'utf8',
+      )
+
+      await writeFile(
+        join(ghPluginDir, 'package.json'),
+        JSON.stringify({
+          name: 'demo-gh-bundle',
+          version: '1.5.0',
+          dsh: { bundle: { patch: './cordis.patch.yml' } },
+        }),
+        'utf8',
+      )
+
+      await writeFile(
+        join(profileDir, 'package.json'),
+        JSON.stringify({
+          name: 'dsh-profile-test',
+          private: true,
+          dsh: {
+            profile: {
+              bundles: ['@deepseek-ai/dsh-base', 'my-local-bundle', 'demo-npm-bundle', 'demo-gh-bundle'],
+            },
+          },
+          dependencies: {
+            'my-local-bundle': `link:${localPluginDir}`,
+            'demo-npm-bundle': '2.0.0',
+            'demo-gh-bundle': 'github:example/demo-gh-bundle#deadbeef',
+          },
+        }),
+        'utf8',
+      )
+
+      const discovered = await listLocalPlugins({ profileDir })
+      assert.equal(discovered.plugins.length, 3)
+
+      const packedBuf = await packLocalPluginDirectory(localPluginDir)
+      assert.ok(packedBuf.length > 0)
+
+      // Simulated remote plugin state
+      const remotePluginsState = new Map([
+        ['demo-npm-bundle', { installed: true, remoteVersion: '1.9.0' }], // remote <= local (auto reinstall)
+        ['demo-gh-bundle', { installed: true, remoteVersion: '3.0.0' }],  // remote > local (confirm required)
+        ['my-local-bundle', { installed: false, remoteVersion: null }],   // not installed on remote
+      ])
+      const installCalls = []
+
+      const mockSpawn = (_cmd, args) => {
+        const child = new EventEmitter()
+        child.stdin = new PassThrough()
+        child.stdout = new PassThrough()
+        child.stderr = new PassThrough()
+        child.exitCode = null
+        child.killed = false
+        child.kill = () => {
+          child.killed = true
+          child.exitCode = 0
+          child.emit('close', 0)
+        }
+
+        if (args.includes('-L')) {
+          setTimeout(() => {
+            child.stdout.write(`${EVENT_PREFIX}{"type":"ready","url":"http://127.0.0.1:43333/?token=t","remotePort":3080,"localPort":43333,"profile":"web","pid":1111}\n`)
+          }, 10)
+          child.stdin.on('data', (c) => {
+            if (String(c).includes('SHUTDOWN')) {
+              child.exitCode = 0
+              child.emit('close', 0)
+            }
+          })
+          return child
+        }
+
+        // Decode remote command to determine whether it's plugin_check or plugin_synced
+        const remoteCmd = args.at(-1) || ''
+        const b64Match = /printf %s ([A-Za-z0-9+/=]+) \| base64 -d/.exec(remoteCmd)
+        const outerScript = b64Match ? Buffer.from(b64Match[1], 'base64').toString('utf8') : ''
+        const innerMatch = /printf %s '([A-Za-z0-9+/=]+)' \| base64 -d/.exec(outerScript)
+        const innerJs = innerMatch ? Buffer.from(innerMatch[1], 'base64').toString('utf8') : ''
+
+        let stdinLen = 0
+        child.stdin.on('data', (chunk) => {
+          stdinLen += chunk.length
+        })
+        child.stdin.on('end', () => {
+          if (innerJs.includes("type: 'plugin_check'")) {
+            const pkgMatch = /const pkgName = "([^"]+)"/.exec(innerJs)
+            const pkgName = pkgMatch ? pkgMatch[1] : ''
+            const st = remotePluginsState.get(pkgName) || { installed: false, remoteVersion: null }
+            child.stdout.write(`${EVENT_PREFIX}${JSON.stringify({
+              type: 'plugin_check',
+              packageName: pkgName,
+              installed: st.installed,
+              remoteVersion: st.remoteVersion,
+            })}\n`)
+            child.exitCode = 0
+            child.emit('close', 0)
+          } else {
+            const pkgMatch = /const pkgName = "([^"]+)"/.exec(innerJs)
+            const kindMatch = /const sourceKind = "([^"]+)"/.exec(innerJs)
+            const reinstallMatch = /const reinstall = (true|false)/.exec(innerJs)
+            const pkgName = pkgMatch ? pkgMatch[1] : ''
+            const sourceKind = kindMatch ? kindMatch[1] : ''
+            const reinstall = reinstallMatch ? reinstallMatch[1] === 'true' : false
+            installCalls.push({ pkgName, sourceKind, reinstall, stdinLen })
+            child.stdout.write(`${EVENT_PREFIX}${JSON.stringify({
+              type: 'plugin_synced',
+              ok: true,
+              packageName: pkgName,
+              installedVersion: 'synced-ver',
+              sourceKind,
+              reinstalled: reinstall,
+            })}\n`)
+            child.exitCode = 0
+            child.emit('close', 0)
+          }
+        })
+
+        return child
+      }
+
+      const manager = new RemoteConnectionManager({
+        sshConfigPath,
+        localProfileDir: profileDir,
+        dshVersion: '0.2.2-rc.3',
+        spawnProcess: mockSpawn,
+      })
+
+      await manager.init()
+      try {
+        await manager.connectHost('sync-box', { waitForReady: true })
+
+        // Case A: Not installed on remote (local source) -> installs directly with streamed stdin payload
+        const resLocal = await manager.syncPluginToHost('sync-box', { pluginName: 'my-local-bundle' })
+        assert.equal(resLocal.status, 'synced')
+        assert.equal(resLocal.sourceKind, 'local')
+        assert.equal(resLocal.reinstalled, false)
+        assert.ok(installCalls.at(-1).stdinLen > 0)
+
+        // Case B: Installed on remote with version 1.9.0 <= local 2.0.0 -> deletes & reinstalls directly without confirmation
+        const resNpm = await manager.syncPluginToHost('sync-box', { pluginName: 'demo-npm-bundle' })
+        assert.equal(resNpm.status, 'synced')
+        assert.equal(resNpm.sourceKind, 'npm')
+        assert.equal(resNpm.reinstalled, true)
+        assert.equal(resNpm.previousRemoteVersion, '1.9.0')
+
+        // Case C: Installed on remote with version 3.0.0 > local 1.5.0 -> returns confirm_required first!
+        const resGhAsk = await manager.syncPluginToHost('sync-box', { pluginName: 'demo-gh-bundle', force: false })
+        assert.equal(resGhAsk.status, 'confirm_required')
+        assert.equal(resGhAsk.remoteVersion, '3.0.0')
+        assert.equal(resGhAsk.localVersion, '1.5.0')
+        assert.equal(installCalls.some((c) => c.pkgName === 'demo-gh-bundle'), false, 'Must not install before user confirms')
+
+        // Now user confirms (force: true) -> deletes remote and reinstalls!
+        const resGhForce = await manager.syncPluginToHost('sync-box', { pluginName: 'demo-gh-bundle', force: true })
+        assert.equal(resGhForce.status, 'synced')
+        assert.equal(resGhForce.reinstalled, true)
+        assert.equal(resGhForce.previousRemoteVersion, '3.0.0')
+        assert.equal(installCalls.some((c) => c.pkgName === 'demo-gh-bundle' && c.reinstall === true), true)
+
+        await manager.disconnectHost('sync-box')
+      } finally {
+        await manager.dispose()
+      }
+    } finally {
+      await rm(tmpRoot, { recursive: true, force: true })
+    }
+  }
+
+  // 11. Cordis strict Proxy context startup test (must never access uninjected properties like storageDomain directly)
+  {
+    const cleanups = []
+    const injectedCallbacks = []
+    const baseCtx = {
+      effect(fn) {
+        const cleanup = fn()
+        if (typeof cleanup === 'function') cleanups.push(cleanup)
+      },
+      inject(deps, fn) {
+        injectedCallbacks.push({ deps, fn })
+      },
+      get() {
+        return undefined
+      },
+    }
+    const strictCtx = new Proxy(baseCtx, {
+      get(target, prop, receiver) {
+        if (prop in target || typeof prop === 'symbol') {
+          return Reflect.get(target, prop, receiver)
+        }
+        throw new Error(`cannot get property "${String(prop)}" without inject`)
+      },
+    })
+
+    const mgr = applyHostPlugin(strictCtx, {})
+    assert.ok(mgr)
+    assert.equal(injectedCallbacks.some((c) => c.deps.includes('storageDomain')), true)
+    assert.equal(injectedCallbacks.some((c) => c.deps.includes('connection')), true)
+    assert.equal(injectedCallbacks.some((c) => c.deps.includes('tools')), true)
+
+    // Wait briefly for async init, then run all effect disposers
+    await new Promise((r) => setTimeout(r, 30))
+    for (const cleanup of cleanups) {
+      await cleanup()
     }
   }
 

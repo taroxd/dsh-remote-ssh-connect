@@ -3,12 +3,20 @@
 
 import { spawn } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { createServer as createNetServer } from 'node:net'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { AskpassCoordinator } from './askpass-server.js'
 import { openUrlInDefaultBrowser } from './browser-opener.js'
+import {
+  buildRemoteCheckPluginScript,
+  buildRemoteInstallPluginScript,
+  comparePluginVersions,
+  listLocalPlugins,
+  packLocalPluginDirectory,
+} from './plugin-sync.js'
 import { buildKillRemotePortScript, buildRemoteBootstrapScript, EVENT_PREFIX } from './remote-script.js'
 import { loadSshConfigHosts } from './ssh-config.js'
 
@@ -142,6 +150,7 @@ export class RemoteConnectionManager {
   constructor(options = {}) {
     this.sshConfigPath = options.sshConfigPath
     this.homeDir = options.homeDir
+    this.localProfileDir = options.localProfileDir
     this.dshVersion = options.dshVersion ?? resolveLocalDshVersion()
     this.sshExecutable = options.sshExecutable ?? 'ssh'
     this.extraSshArgs = options.extraSshArgs ?? []
@@ -227,11 +236,22 @@ export class RemoteConnectionManager {
     }
   }
 
-  async listHosts() {
-    const parsed = await loadSshConfigHosts({
-      configPath: this.sshConfigPath,
+  async listLocalPlugins() {
+    const res = await listLocalPlugins({
+      profileDir: this.localProfileDir,
       homeDir: this.homeDir,
     })
+    return res.plugins
+  }
+
+  async listHosts() {
+    const [parsed, localPlugins] = await Promise.all([
+      loadSshConfigHosts({
+        configPath: this.sshConfigPath,
+        homeDir: this.homeDir,
+      }),
+      this.listLocalPlugins().catch(() => []),
+    ])
     const items = []
     const seen = new Set()
 
@@ -253,6 +273,7 @@ export class RemoteConnectionManager {
       configPath: parsed.configPath,
       configExists: parsed.exists,
       dshVersion: this.dshVersion,
+      localPlugins,
       hosts: items,
     }
   }
@@ -646,21 +667,25 @@ export class RemoteConnectionManager {
    * @param {object} payload
    * @param {string} [payload.promptId]
    * @param {string} payload.value
-   * @param {string} [payload.otp]
    */
   submitAuth(host, payload = {}) {
     const hostKey = String(host || '').trim()
     const rawVal = typeof payload.value === 'string' ? payload.value : ''
-    const otpSuffix = typeof payload.otp === 'string' && payload.otp.trim() !== '' ? payload.otp.trim() : ''
-    const combined = otpSuffix ? `${rawVal}${otpSuffix}` : rawVal
-    const ok = this.askpass.submitForHost(hostKey, payload.promptId, combined)
+    const ok = this.askpass.submitForHost(hostKey, payload.promptId, rawVal)
     return { ok }
   }
 
-  cancelAuth(host, payload = {}) {
+  /**
+   * Cancel interactive authentication and immediately terminate the SSH connection for `host`.
+   * @param {string} host
+   * @param {object} [payload]
+   * @param {string} [payload.promptId]
+   */
+  async cancelAuth(host, payload = {}) {
     const hostKey = String(host || '').trim()
-    const ok = this.askpass.cancelForHost(hostKey, payload.promptId)
-    return { ok }
+    this.askpass.cancelForHost(hostKey, payload.promptId)
+    await this.disconnectHost(hostKey)
+    return { ok: true, disconnected: true }
   }
 
   /**
@@ -740,6 +765,206 @@ export class RemoteConnectionManager {
       throw new Error(`Host "${hostKey}" is not currently connected.`)
     }
     return this.openBrowser(sess.url)
+  }
+
+  /**
+   * Run a short-lived SSH command on `host`, optionally piping `stdinBuffer`, and parse `DSH_RC_EVENT:` records.
+   * @param {string} hostKey
+   * @param {string} remoteCmd
+   * @param {Buffer | null} [stdinBuffer]
+   * @returns {Promise<{ events: object[], stdout: string, stderr: string, exitCode: number }>}
+   */
+  async _runRemoteCommand(hostKey, remoteCmd, stdinBuffer = null) {
+    await this.askpass.start()
+    const askpassSession = this.askpass.createSessionEnv(hostKey)
+    const sshArgs = [
+      '-T',
+      '-o', 'BatchMode=no',
+      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', 'ConnectTimeout=20',
+      ...this.extraSshArgs,
+      '--',
+      hostKey,
+      remoteCmd,
+    ]
+
+    try {
+      return await new Promise((resolve, reject) => {
+        const child = this.spawnProcess(this.sshExecutable, sshArgs, {
+          stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
+          env: {
+            ...process.env,
+            ...askpassSession.env,
+          },
+        })
+
+        const events = []
+        let stdout = ''
+        let stderr = ''
+
+        createInterface({ input: child.stdout }).on('line', (line) => {
+          const trimmed = line.trim()
+          if (!trimmed) return
+          const idx = trimmed.indexOf(EVENT_PREFIX)
+          if (idx !== -1) {
+            try {
+              events.push(JSON.parse(trimmed.slice(idx + EVENT_PREFIX.length)))
+              return
+            } catch {
+              /* fall through */
+            }
+          }
+          stdout += `${trimmed}\n`
+        })
+
+        createInterface({ input: child.stderr }).on('line', (line) => {
+          const trimmed = line.trim()
+          if (trimmed) stderr += `${trimmed}\n`
+        })
+
+        child.once('error', reject)
+        child.once('close', (code) => {
+          resolve({
+            events,
+            stdout: stdout.trim(),
+            stderr: stderr.trim(),
+            exitCode: code ?? 1,
+          })
+        })
+
+        if (stdinBuffer && stdinBuffer.length > 0) {
+          child.stdin.end(stdinBuffer)
+        } else {
+          child.stdin.end()
+        }
+      })
+    } finally {
+      askpassSession.dispose()
+    }
+  }
+
+  /**
+   * Synchronize a locally installed plugin to a connected remote host using the same
+   * installation method (`npm`, `github`, or `local`).
+   *
+   * - If the plugin is not installed on the remote, installs it directly.
+   * - If the plugin is already installed on the remote and `remoteVersion <= localVersion`,
+   *   deletes the remote plugin and reinstalls it directly.
+   * - If the plugin is already installed on the remote and `remoteVersion > localVersion`:
+   *   - When `force !== true`, returns `{ status: 'confirm_required', ... }` so the UI can ask the user for confirmation.
+   *   - When `force === true`, deletes the remote plugin and reinstalls it.
+   *
+   * @param {string} host
+   * @param {object} options
+   * @param {string} options.pluginName
+   * @param {boolean} [options.force=false]
+   */
+  async syncPluginToHost(host, options = {}) {
+    const hostKey = String(host || '').trim()
+    const pluginName = String(options.pluginName || '').trim()
+    const force = options.force === true
+
+    if (!hostKey) throw new Error('Host alias is required.')
+    if (!pluginName) throw new Error('Plugin name is required.')
+
+    const sess = this.sessions.get(hostKey)
+    if (!sess || sess.status !== 'connected') {
+      throw new Error(`Host "${hostKey}" must be connected before syncing plugins.`)
+    }
+
+    const localPlugins = await this.listLocalPlugins()
+    const localPlugin = localPlugins.find((p) => p.name === pluginName)
+    if (!localPlugin) {
+      throw new Error(`Local plugin "${pluginName}" was not found in the local DSH profile.`)
+    }
+
+    const remoteProfile = sess.activeProfile || 'web'
+    const dshVersion = sess.dshVersion || this.dshVersion
+
+    // Step 1: Check whether the plugin is already installed on the remote profile
+    const checkCmd = buildRemoteCheckPluginScript({
+      dshVersion,
+      profile: remoteProfile,
+      packageName: localPlugin.name,
+    })
+    const checkRun = await this._runRemoteCommand(hostKey, checkCmd, null)
+    const checkEvent = checkRun.events.find((e) => e.type === 'plugin_check')
+    if (!checkEvent && checkRun.exitCode !== 0) {
+      throw new Error(checkRun.stderr || checkRun.stdout || `Failed to inspect remote profile "${remoteProfile}" on ${hostKey}.`)
+    }
+
+    const remoteInstalled = Boolean(checkEvent?.installed)
+    const remoteVersion = typeof checkEvent?.remoteVersion === 'string' && checkEvent.remoteVersion.trim() !== ''
+      ? checkEvent.remoteVersion.trim()
+      : null
+
+    // Step 2: Compare versions if already installed on remote
+    if (remoteInstalled && remoteVersion !== null) {
+      const cmp = comparePluginVersions(remoteVersion, localPlugin.version)
+      if (cmp > 0 && !force) {
+        return {
+          status: 'confirm_required',
+          host: hostKey,
+          profile: remoteProfile,
+          pluginName: localPlugin.name,
+          pluginTitle: localPlugin.title,
+          sourceKind: localPlugin.sourceKind,
+          localVersion: localPlugin.version,
+          remoteVersion,
+        }
+      }
+    }
+
+    // Step 3: Prepare base64 payload for local-source plugins
+    let stdinBuffer = null
+    let tarballFilename = 'plugin.tgz'
+    if (localPlugin.sourceKind === 'local') {
+      if (localPlugin.localSubkind === 'tarball') {
+        const rawTgz = await readFile(localPlugin.localPath)
+        stdinBuffer = Buffer.from(rawTgz.toString('base64'), 'utf8')
+        tarballFilename = basename(localPlugin.localPath)
+      } else {
+        const packed = await packLocalPluginDirectory(localPlugin.localPath)
+        stdinBuffer = Buffer.from(packed.toString('base64'), 'utf8')
+      }
+    }
+
+    // Step 4: Remove existing (if installed) and install on remote
+    const installCmd = buildRemoteInstallPluginScript({
+      dshVersion,
+      profile: remoteProfile,
+      packageName: localPlugin.name,
+      sourceKind: localPlugin.sourceKind,
+      localSubkind: localPlugin.localSubkind,
+      localLinkPrefix: localPlugin.localLinkPrefix,
+      installSpec: localPlugin.installSpec,
+      tarballFilename,
+      reinstall: remoteInstalled,
+    })
+
+    const installRun = await this._runRemoteCommand(hostKey, installCmd, stdinBuffer)
+    const errEvent = installRun.events.find((e) => e.type === 'plugin_sync_error')
+    if (errEvent) {
+      throw new Error(errEvent.message || `Failed to sync plugin "${localPlugin.name}" to ${hostKey}.`)
+    }
+    const syncedEvent = installRun.events.find((e) => e.type === 'plugin_synced')
+    if (!syncedEvent && installRun.exitCode !== 0) {
+      throw new Error(installRun.stderr || installRun.stdout || `Failed to sync plugin "${localPlugin.name}" to ${hostKey}.`)
+    }
+
+    return {
+      status: 'synced',
+      host: hostKey,
+      profile: remoteProfile,
+      pluginName: localPlugin.name,
+      pluginTitle: localPlugin.title,
+      sourceKind: localPlugin.sourceKind,
+      localVersion: localPlugin.version,
+      installedVersion: syncedEvent?.installedVersion || localPlugin.version,
+      previousRemoteVersion: remoteVersion,
+      reinstalled: remoteInstalled,
+    }
   }
 
   /**

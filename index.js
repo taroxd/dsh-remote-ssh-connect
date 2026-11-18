@@ -64,7 +64,7 @@ function registerAgentTool(ctx, manager) {
   ctx.inject(['tools'], (scope) => {
     scope.effect(() => scope.tools.register({
       name: 'remote_connect',
-      description: 'Manage SSH remote DSH connections configured in ~/.ssh/config: list hosts and their connection statuses, configure per-host remotePort/localPort/profile, connect or disconnect a host, open a connected remote DSH in the default browser, or terminate a conflicting process occupying the remote port. Interactive password/OTP entry remains user-only in the SSH Login UI.',
+      description: 'Manage SSH remote DSH connections configured in ~/.ssh/config: list hosts and their connection statuses, configure per-host remotePort/localPort/profile, connect or disconnect a host, open a connected remote DSH in the default browser, terminate a conflicting process occupying the remote port, or sync a local plugin to a connected remote host. Interactive password/OTP entry remains user-only in the SSH Connections UI.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -72,12 +72,20 @@ function registerAgentTool(ctx, manager) {
         properties: {
           action: {
             type: 'string',
-            enum: ['list_hosts', 'get_status', 'configure_host', 'connect', 'disconnect', 'open_browser', 'kill_remote_port'],
+            enum: ['list_hosts', 'get_status', 'configure_host', 'connect', 'disconnect', 'open_browser', 'kill_remote_port', 'list_local_plugins', 'sync_plugin'],
             description: 'Operation to perform.',
           },
           host: {
             type: 'string',
-            description: 'SSH host alias from ~/.ssh/config (required for all actions except list_hosts).',
+            description: 'SSH host alias from ~/.ssh/config (required for host-specific actions).',
+          },
+          pluginName: {
+            type: 'string',
+            description: 'For sync_plugin: exact package name of the local plugin to synchronize to the remote host.',
+          },
+          force: {
+            type: 'boolean',
+            description: 'For sync_plugin: true only after the user explicitly confirms overwriting a higher remote plugin version.',
           },
           remotePort: {
             type: 'integer',
@@ -154,6 +162,19 @@ function registerAgentTool(ctx, manager) {
             })
             return JSON.stringify(res, null, 2)
           }
+          case 'list_local_plugins': {
+            const res = await manager.listLocalPlugins()
+            return JSON.stringify(res, null, 2)
+          }
+          case 'sync_plugin': {
+            if (!args?.host) throw new Error('Parameter "host" is required for sync_plugin')
+            if (!args?.pluginName) throw new Error('Parameter "pluginName" is required for sync_plugin')
+            const res = await manager.syncPluginToHost(args.host, {
+              pluginName: args.pluginName,
+              force: args.force === true,
+            })
+            return JSON.stringify(res, null, 2)
+          }
           default:
             throw new Error(`Unknown action: ${String(action)}`)
         }
@@ -175,41 +196,47 @@ export function apply(ctx, config = {}) {
   })
 
   ctx.effect(() => {
-    let domain
     let disposed = false
-    const ready = (async () => {
-      const storageDomain = ctx.get?.('storageDomain') ?? ctx.storageDomain
-      const initialConfigs = {}
-      if (storageDomain) {
+    const ready = manager.init()
+    return async () => {
+      disposed = true
+      await ready.catch(() => {})
+      await manager.dispose()
+    }
+  }, 'remote-connect: lifecycle')
+
+  ctx.inject(['storageDomain'], (scope) => {
+    scope.effect(() => {
+      let domain
+      let disposed = false
+      const ready = (async () => {
         try {
-          domain = await storageDomain.open(domainSpec)
+          domain = await scope.storageDomain.open(domainSpec)
           if (disposed) {
             await domain.close()
             return
           }
           table = domain.table('hostConfigs')
           for (const [hostKey, record] of table.entries()) {
-            initialConfigs[hostKey] = record
+            if (!manager.hostConfigs.has(hostKey)) {
+              manager.hostConfigs.set(hostKey, normalizeHostConfig(record))
+            }
           }
         } catch (err) {
-          ctx.logger?.warn?.('remote-connect: storageDomain open failed, using in-memory config', err)
+          scope.logger?.warn?.('remote-connect: storageDomain open failed, using in-memory config', err)
+        }
+      })()
+
+      return async () => {
+        disposed = true
+        table = undefined
+        await ready.catch(() => {})
+        if (domain !== undefined) {
+          await domain.close().catch(() => {})
         }
       }
-      if (!disposed) {
-        await manager.init(initialConfigs)
-      }
-    })()
-
-    return async () => {
-      disposed = true
-      table = undefined
-      await ready.catch(() => {})
-      await manager.dispose()
-      if (domain !== undefined) {
-        await domain.close().catch(() => {})
-      }
-    }
-  }, 'remote-connect: lifecycle')
+    }, 'remote-connect: storage')
+  })
 
   registerRoute(ctx, 'list', () => manager.listHosts())
   registerRoute(ctx, 'status', (body) => manager.getHostStatus(body.host))
@@ -228,10 +255,14 @@ export function apply(ctx, config = {}) {
     reconnect: body.reconnect !== false,
     waitForReady: Boolean(body.waitForReady),
   }))
+  registerRoute(ctx, 'local-plugins', () => manager.listLocalPlugins())
+  registerRoute(ctx, 'sync-plugin', (body) => manager.syncPluginToHost(body.host, {
+    pluginName: body.pluginName,
+    force: Boolean(body.force),
+  }))
   registerRoute(ctx, 'auth-submit', (body) => manager.submitAuth(body.host, {
     promptId: body.promptId,
     value: body.value,
-    otp: body.otp,
   }))
   registerRoute(ctx, 'auth-cancel', (body) => manager.cancelAuth(body.host, {
     promptId: body.promptId,
@@ -263,3 +294,11 @@ export {
 export {
   openUrlInDefaultBrowser,
 } from './src/browser-opener.js'
+export {
+  comparePluginVersions,
+  classifyInstallSource,
+  listLocalPlugins,
+  packLocalPluginDirectory,
+  buildRemoteCheckPluginScript,
+  buildRemoteInstallPluginScript,
+} from './src/plugin-sync.js'

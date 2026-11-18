@@ -1,4 +1,4 @@
-// Client half of dsh-remote-connect: registers "SSH 登录" / "SSH login" in the
+// Client half of dsh-remote-connect: registers "SSH 连接" / "SSH connect" in the
 // left navigation sidebar and renders the bilingual SSH Management Panel.
 // Uses only official --dsw-alias-* theme tokens and React (no private primitive imports).
 
@@ -12,9 +12,9 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'remote-connect'
 
     const zh = {
-      panel: 'SSH 登录',
+      panel: 'SSH 连接',
       title: 'SSH 远端连接管理',
-      subtitle: '管理 ~/.ssh/config 中的 Linux 主机，通过 SSH 自动部署同版本 DSH 并建立本地端口映射',
+      subtitle: '管理 ~/.ssh/config 中的 Linux 主机，通过 SSH 自动部署同版本 DSH、同步本地插件并建立本地端口映射',
       refresh: '刷新列表',
       dshVersionBadge: '目标 DSH 版本：{version}',
       summaryCounts: '共 {total} 台主机 · {connected} 台已连接',
@@ -67,6 +67,26 @@ window.__ModuleLoader__.load({
       urlCopied: '已复制',
       nextConfigNotice: '已修改下次连接配置：远端端口 {remotePort} / 本地端口 {localPort} / Profile {profile}',
 
+      syncPluginLabel: '同步本地插件',
+      syncPluginPlaceholder: '选择要同步到远端的本地插件…',
+      syncPluginNoLocal: '当前本地 Profile 暂无可同步的第三方或本地插件',
+      sourceKind_npm: 'npm 源',
+      sourceKind_github: 'GitHub 源',
+      sourceKind_local: '本地源',
+      btnSyncPlugin: '同步安装到远端',
+      btnSyncingPlugin: '正在同步安装…',
+      syncSuccessFresh: '已通过 {source} 将插件 {name} (v{version}) 同步安装到远端（Profile: {profile}）',
+      syncSuccessReinstalled: '已删除远端原有版本并重新通过 {source} 安装插件 {name} (v{version})',
+
+      overwriteModalTitle: '远端插件版本更高 — 确认覆盖安装？',
+      overwriteModalDesc: '远端主机 {host}（Profile: {profile}）上已安装插件 {name}，且远端版本（v{remoteVersion}）高于本地版本（v{localVersion}）。确认继续将删除远端已有插件并重新安装本地版本（v{localVersion}）。',
+      overwriteRemoteVerLabel: '远端已安装版本',
+      overwriteLocalVerLabel: '本地待同步版本',
+      overwriteSourceLabel: '同步安装方式',
+      btnConfirmOverwrite: '确认删除并重装',
+      btnConfirmingOverwrite: '正在重装…',
+      btnCancelOverwrite: '取消',
+
       portConflictTitle: '远端端口 {port} 已被占用',
       portConflictDescWithProcess: '检测到远端主机端口 {port} 已被占用（进程 PID {pid}{cmd}）。为避免破坏已有服务，插件未自动绕过，请选择以下任一处理方式：',
       portConflictDescGeneric: '检测到远端主机端口 {port} 已被占用（可能已有正在运行的 DSH 或其他服务）。请选择终止占用该端口的程序，或更换其他远端端口：',
@@ -88,13 +108,10 @@ window.__ModuleLoader__.load({
       authInputPlaceholderPassphrase: '请输入私钥口令 (Passphrase)',
       authInputPlaceholderConfirm: '请输入 yes 或 no',
       authInputPlaceholderGeneric: '请输入认证信息',
-      authOptionalOtpLabel: '附加 OTP 动态口令（可选）',
-      authOptionalOtpPlaceholder: '若服务端要求单次输入「密码+OTP拼接」可在此填写；若分两步验证请留空',
-      authOptionalOtpHint: '提示：如果服务器先验证密码再弹出第二步询问 OTP，请直接留空此项并在下一步弹窗中输入 OTP。',
       authShowSecret: '显示输入内容',
       authHideSecret: '隐藏输入内容',
       btnAuthSubmit: '确认提交',
-      btnAuthCancel: '取消连接',
+      btnAuthCancel: '取消',
 
       urlModalTitle: '打开远端 DSH — {host}',
       urlModalFallbackDesc: '当前操作系统环境不支持直接唤起默认浏览器（{reason}）。请点击或复制下方链接在浏览器中打开：',
@@ -105,9 +122,9 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
-      panel: 'SSH login',
+      panel: 'SSH connect',
       title: 'Remote SSH connections',
-      subtitle: 'Manage Linux hosts from ~/.ssh/config, provision matching DSH versions over SSH, and forward ports locally',
+      subtitle: 'Manage Linux hosts from ~/.ssh/config, provision matching DSH versions over SSH, sync local plugins, and forward ports locally',
       refresh: 'Refresh',
       dshVersionBadge: 'Target DSH: {version}',
       summaryCounts: '{total} hosts · {connected} connected',
@@ -160,6 +177,26 @@ window.__ModuleLoader__.load({
       urlCopied: 'Copied',
       nextConfigNotice: 'Next connection settings: remote port {remotePort} / local port {localPort} / profile {profile}',
 
+      syncPluginLabel: 'Sync local plugin',
+      syncPluginPlaceholder: 'Select a local plugin to sync…',
+      syncPluginNoLocal: 'No user-installed local plugins found in the current profile',
+      sourceKind_npm: 'npm source',
+      sourceKind_github: 'GitHub source',
+      sourceKind_local: 'Local source',
+      btnSyncPlugin: 'Sync to remote',
+      btnSyncingPlugin: 'Syncing…',
+      syncSuccessFresh: 'Synced and installed {name} (v{version}) via {source} on remote profile "{profile}"',
+      syncSuccessReinstalled: 'Removed existing remote copy and reinstalled {name} (v{version}) via {source}',
+
+      overwriteModalTitle: 'Remote plugin version is newer — confirm reinstall?',
+      overwriteModalDesc: 'Host "{host}" (profile: "{profile}") already has "{name}" installed at version v{remoteVersion}, which is newer than your local version (v{localVersion}). Proceeding will remove the remote copy and reinstall v{localVersion}.',
+      overwriteRemoteVerLabel: 'Installed on remote',
+      overwriteLocalVerLabel: 'Local version to install',
+      overwriteSourceLabel: 'Install method',
+      btnConfirmOverwrite: 'Delete & reinstall',
+      btnConfirmingOverwrite: 'Reinstalling…',
+      btnCancelOverwrite: 'Cancel',
+
       portConflictTitle: 'Remote port {port} is already in use',
       portConflictDescWithProcess: 'Remote port {port} is already occupied (PID {pid}{cmd}). Choose how to resolve this conflict:',
       portConflictDescGeneric: 'Remote port {port} is already in use on the remote host (an existing DSH or another service may be running). Terminate the occupying process or choose another port:',
@@ -181,13 +218,10 @@ window.__ModuleLoader__.load({
       authInputPlaceholderPassphrase: 'Enter key passphrase',
       authInputPlaceholderConfirm: 'Enter yes or no',
       authInputPlaceholderGeneric: 'Enter response',
-      authOptionalOtpLabel: 'Append OTP code (optional)',
-      authOptionalOtpPlaceholder: 'Fill only if the server requires Password+OTP in one field; leave blank for two-step prompt',
-      authOptionalOtpHint: 'Tip: If your server prompts for password first and asks for OTP in a second step, leave this blank and enter the OTP in the next prompt.',
       authShowSecret: 'Show input',
       authHideSecret: 'Hide input',
       btnAuthSubmit: 'Submit',
-      btnAuthCancel: 'Cancel connection',
+      btnAuthCancel: 'Cancel',
 
       urlModalTitle: 'Open remote DSH — {host}',
       urlModalFallbackDesc: 'The operating system could not open the default browser directly ({reason}). Click or copy the URL below to open it manually:',
@@ -417,7 +451,7 @@ window.__ModuleLoader__.load({
 .dsh-rc-connected-box {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   padding: 12px 14px;
   border-radius: 8px;
   background: var(--dsw-alias-bg-layer-2);
@@ -441,6 +475,39 @@ window.__ModuleLoader__.load({
   align-items: center;
   gap: 8px;
   word-break: break-all;
+}
+.dsh-rc-sync-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+.dsh-rc-sync-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  flex: 1;
+  justify-content: flex-end;
+}
+.dsh-rc-select {
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font-size: 12.5px;
+  min-width: 220px;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.dsh-rc-select:focus {
+  outline: 1.5px solid var(--dsw-alias-brand-primary);
+  border-color: var(--dsw-alias-brand-primary);
 }
 .dsh-rc-url-link {
   color: var(--dsw-alias-brand-primary);
@@ -556,6 +623,10 @@ window.__ModuleLoader__.load({
 .dsh-rc-notice {
   font-size: 12px;
   color: var(--dsw-alias-state-success-primary);
+}
+.dsh-rc-error-inline {
+  font-size: 12px;
+  color: var(--dsw-alias-state-error-primary);
 }
 .dsh-rc-empty {
   padding: 36px 24px;
@@ -695,16 +766,27 @@ window.__ModuleLoader__.load({
       }
     }
 
+    function sourceKindText(sourceKind, t) {
+      if (sourceKind === 'github') return t('sourceKind_github')
+      if (sourceKind === 'local') return t('sourceKind_local')
+      return t('sourceKind_npm')
+    }
+
+    /**
+     * Interactive authentication dialog for Password / OTP / Passphrase / Confirmation prompts.
+     * - Password prompt: shows only the password field (no extra OTP box; if the server requires OTP, a second prompt will appear).
+     * - OTP prompt: always plain text, no "Hide input" / "Show input" toggle.
+     * - Clicking Cancel terminates the SSH connection attempt immediately.
+     */
     function AuthModal({ promptInfo, onSubmit, onCancel, t }) {
       const [value, setValue] = React.useState('')
-      const [otp, setOtp] = React.useState('')
       const [showSecret, setShowSecret] = React.useState(false)
       const [submitting, setSubmitting] = React.useState(false)
       const inputRef = React.useRef(null)
 
       React.useEffect(() => {
         setValue('')
-        setOtp('')
+        setShowSecret(false)
         setSubmitting(false)
         const timer = setTimeout(() => {
           inputRef.current?.focus?.()
@@ -726,8 +808,11 @@ window.__ModuleLoader__.load({
       if (!promptInfo) return null
 
       const kind = promptInfo.kind || 'password'
+      const isOtp = kind === 'otp'
       const isConfirm = kind === 'confirm'
-      const placeholder = kind === 'otp'
+      const alwaysPlainText = isOtp || isConfirm
+
+      const placeholder = isOtp
         ? t('authInputPlaceholderOtp')
         : kind === 'passphrase'
           ? t('authInputPlaceholderPassphrase')
@@ -746,7 +831,6 @@ window.__ModuleLoader__.load({
             host: promptInfo.host,
             promptId: promptInfo.id,
             value,
-            otp: kind === 'password' ? otp : '',
           })
         } finally {
           setSubmitting(false)
@@ -768,25 +852,14 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dsh-rc-field' },
           h('input', {
             ref: inputRef,
-            type: isConfirm || showSecret ? 'text' : 'password',
+            type: alwaysPlainText || showSecret ? 'text' : 'password',
             className: 'dsh-rc-input',
             value,
             placeholder,
             autoComplete: 'off',
             onChange: (e) => setValue(e.target.value),
           })),
-        kind === 'password' && h('div', { className: 'dsh-rc-field' },
-          h('label', { className: 'dsh-rc-field-label' }, t('authOptionalOtpLabel')),
-          h('input', {
-            type: showSecret ? 'text' : 'password',
-            className: 'dsh-rc-input',
-            value: otp,
-            placeholder: t('authOptionalOtpPlaceholder'),
-            autoComplete: 'off',
-            onChange: (e) => setOtp(e.target.value),
-          }),
-          h('span', { className: 'dsh-rc-field-hint' }, t('authOptionalOtpHint'))),
-        !isConfirm && h('label', {
+        !alwaysPlainText && h('label', {
           style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)' },
         },
         h('input', {
@@ -806,6 +879,82 @@ window.__ModuleLoader__.load({
             className: 'dsh-rc-btn dsh-rc-btn-primary',
             disabled: submitting,
           }, t('btnAuthSubmit')))))
+    }
+
+    /**
+     * Secondary confirmation dialog when the remote host already has a higher version of the selected plugin installed.
+     */
+    function PluginOverwriteModal({ confirmInfo, onConfirm, onCancel, t }) {
+      const [submitting, setSubmitting] = React.useState(false)
+
+      React.useEffect(() => {
+        setSubmitting(false)
+      }, [confirmInfo?.host, confirmInfo?.pluginName])
+
+      React.useEffect(() => {
+        if (!confirmInfo) return undefined
+        const onKeyDown = (e) => {
+          if (e.key === 'Escape' && !submitting) {
+            e.preventDefault()
+            onCancel()
+          }
+        }
+        window.addEventListener('keydown', onKeyDown)
+        return () => window.removeEventListener('keydown', onKeyDown)
+      }, [confirmInfo, submitting, onCancel])
+
+      if (!confirmInfo) return null
+
+      const handleConfirm = async () => {
+        if (submitting) return
+        setSubmitting(true)
+        try {
+          await onConfirm(confirmInfo)
+        } finally {
+          setSubmitting(false)
+        }
+      }
+
+      return h('div', {
+        className: 'dsh-rc-modal-backdrop',
+        role: 'dialog',
+        'aria-modal': 'true',
+        onClick: (e) => { if (e.target === e.currentTarget && !submitting) onCancel() },
+      },
+      h('div', { className: 'dsh-rc-modal' },
+        h('h3', { className: 'dsh-rc-modal-title' }, t('overwriteModalTitle')),
+        h('p', { className: 'dsh-rc-modal-desc' },
+          t('overwriteModalDesc', {
+            host: confirmInfo.host,
+            profile: confirmInfo.profile || 'web',
+            name: confirmInfo.pluginName,
+            remoteVersion: confirmInfo.remoteVersion,
+            localVersion: confirmInfo.localVersion,
+          })),
+        h('div', { className: 'dsh-rc-connected-box' },
+          h('div', { className: 'dsh-rc-kv-row' },
+            h('span', { className: 'dsh-rc-kv-label' }, t('overwriteRemoteVerLabel')),
+            h('span', { className: 'dsh-rc-kv-val', style: { color: 'var(--dsw-alias-state-warn-primary)' } },
+              `v${confirmInfo.remoteVersion}`)),
+          h('div', { className: 'dsh-rc-kv-row' },
+            h('span', { className: 'dsh-rc-kv-label' }, t('overwriteLocalVerLabel')),
+            h('span', { className: 'dsh-rc-kv-val' }, `v${confirmInfo.localVersion}`)),
+          h('div', { className: 'dsh-rc-kv-row' },
+            h('span', { className: 'dsh-rc-kv-label' }, t('overwriteSourceLabel')),
+            h('span', { className: 'dsh-rc-kv-val' }, sourceKindText(confirmInfo.sourceKind, t)))),
+        h('div', { className: 'dsh-rc-modal-actions' },
+          h('button', {
+            type: 'button',
+            className: 'dsh-rc-btn',
+            disabled: submitting,
+            onClick: onCancel,
+          }, t('btnCancelOverwrite')),
+          h('button', {
+            type: 'button',
+            className: 'dsh-rc-btn dsh-rc-btn-danger',
+            disabled: submitting,
+            onClick: handleConfirm,
+          }, submitting ? t('btnConfirmingOverwrite') : t('btnConfirmOverwrite')))))
     }
 
     function UrlFallbackModal({ info, onClose, t }) {
@@ -871,11 +1020,14 @@ window.__ModuleLoader__.load({
 
     function HostCard({
       item,
+      localPlugins,
+      localeId,
       onConnect,
       onDisconnect,
       onOpenBrowser,
       onSaveConfig,
       onKillPortAndReconnect,
+      onSyncPlugin,
       onOpenAuthModal,
       t,
     }) {
@@ -893,6 +1045,19 @@ window.__ModuleLoader__.load({
       const [changingPort, setChangingPort] = React.useState(false)
       const [copiedUrl, setCopiedUrl] = React.useState(false)
       const [browserNotice, setBrowserNotice] = React.useState(null)
+
+      const [selectedPlugin, setSelectedPlugin] = React.useState(() => (localPlugins?.[0]?.name ?? ''))
+      const [syncingPlugin, setSyncingPlugin] = React.useState(false)
+      const [syncNotice, setSyncNotice] = React.useState(null)
+      const [syncError, setSyncError] = React.useState(null)
+
+      React.useEffect(() => {
+        if (!selectedPlugin && localPlugins?.length > 0) {
+          setSelectedPlugin(localPlugins[0].name)
+        } else if (selectedPlugin && localPlugins?.length > 0 && !localPlugins.some((p) => p.name === selectedPlugin)) {
+          setSelectedPlugin(localPlugins[0].name)
+        }
+      }, [localPlugins, selectedPlugin])
 
       React.useEffect(() => {
         setRemotePortInput(String(item.config?.remotePort ?? 3080))
@@ -976,11 +1141,60 @@ window.__ModuleLoader__.load({
         } catch {}
       }
 
+      const handleSyncPluginClick = async () => {
+        if (!selectedPlugin || syncingPlugin) return
+        setSyncingPlugin(true)
+        setSyncNotice(null)
+        setSyncError(null)
+        try {
+          const res = await onSyncPlugin(item.alias, selectedPlugin, false, (confirmedResult) => {
+            const srcLabel = sourceKindText(confirmedResult.sourceKind, t)
+            setSyncNotice(
+              confirmedResult.reinstalled
+                ? t('syncSuccessReinstalled', {
+                  name: confirmedResult.pluginName,
+                  version: confirmedResult.installedVersion || confirmedResult.localVersion,
+                  source: srcLabel,
+                })
+                : t('syncSuccessFresh', {
+                  name: confirmedResult.pluginName,
+                  version: confirmedResult.installedVersion || confirmedResult.localVersion,
+                  source: srcLabel,
+                  profile: confirmedResult.profile || 'web',
+                }),
+            )
+          })
+          if (res && res.status === 'synced') {
+            const srcLabel = sourceKindText(res.sourceKind, t)
+            setSyncNotice(
+              res.reinstalled
+                ? t('syncSuccessReinstalled', {
+                  name: res.pluginName,
+                  version: res.installedVersion || res.localVersion,
+                  source: srcLabel,
+                })
+                : t('syncSuccessFresh', {
+                  name: res.pluginName,
+                  version: res.installedVersion || res.localVersion,
+                  source: srcLabel,
+                  profile: res.profile || 'web',
+                }),
+            )
+          }
+        } catch (err) {
+          setSyncError(err instanceof Error ? err.message : String(err))
+        } finally {
+          setSyncingPlugin(false)
+        }
+      }
+
       const configDiffersFromActive = isConnected && (
         item.config?.remotePort !== item.activeRemotePort ||
         (item.config?.localPort !== 0 && item.config?.localPort !== item.activeLocalPort) ||
         item.config?.profile !== item.activeProfile
       )
+
+      const isZh = String(localeId || '').toLowerCase().startsWith('zh')
 
       return h('li', {
         className: 'dsh-rc-card',
@@ -1056,6 +1270,35 @@ window.__ModuleLoader__.load({
               className: 'dsh-rc-btn dsh-rc-btn-sm',
               onClick: handleCopyUrl,
             }, copiedUrl ? t('urlCopied') : t('btnCopyUrl')))),
+
+        h('div', { className: 'dsh-rc-sync-row' },
+          h('span', { className: 'dsh-rc-kv-label' }, t('syncPluginLabel')),
+          localPlugins && localPlugins.length > 0
+            ? h('div', { className: 'dsh-rc-sync-controls' },
+              h('select', {
+                className: 'dsh-rc-select',
+                value: selectedPlugin,
+                disabled: syncingPlugin,
+                'aria-label': t('syncPluginLabel'),
+                onChange: (e) => setSelectedPlugin(e.target.value),
+              },
+              localPlugins.map((p) => {
+                const displayTitle = (isZh ? p.title?.zh : p.title?.en) || p.name
+                const labelText = displayTitle !== p.name
+                  ? `${displayTitle} (${p.name} v${p.version} · ${sourceKindText(p.sourceKind, t)})`
+                  : `${p.name} (v${p.version} · ${sourceKindText(p.sourceKind, t)})`
+                return h('option', { key: p.name, value: p.name }, labelText)
+              })),
+              h('button', {
+                type: 'button',
+                className: 'dsh-rc-btn dsh-rc-btn-primary dsh-rc-btn-sm',
+                disabled: !selectedPlugin || syncingPlugin,
+                onClick: handleSyncPluginClick,
+              }, syncingPlugin ? t('btnSyncingPlugin') : t('btnSyncPlugin')))
+            : h('span', { className: 'dsh-rc-field-hint' }, t('syncPluginNoLocal'))),
+
+        syncNotice && h('div', { className: 'dsh-rc-notice', role: 'status' }, syncNotice),
+        syncError && h('div', { className: 'dsh-rc-error-inline', role: 'alert' }, syncError),
         browserNotice && h('div', { className: 'dsh-rc-notice' }, browserNotice),
         configDiffersFromActive && h('div', { className: 'dsh-rc-field-hint' },
           t('nextConfigNotice', {
@@ -1222,16 +1465,22 @@ window.__ModuleLoader__.load({
             configPath: '~/.ssh/config',
             configExists: true,
             dshVersion: '',
+            localPlugins: [],
             hosts: [],
           })
-          const [dismissedPromptId, setDismissedPromptId] = React.useState(null)
           const [manualPrompt, setManualPrompt] = React.useState(null)
           const [urlModalInfo, setUrlModalInfo] = React.useState(null)
+          const [overwriteModalInfo, setOverwriteModalInfo] = React.useState(null)
 
           React.useEffect(() => {
             if (!ctx.locale?.subscribe) return undefined
             return ctx.locale.subscribe(() => setLocaleTick((n) => n + 1))
           }, [])
+
+          const localeSnapshot = ctx.locale?.getLocale?.() ?? ctx.locale?.getSnapshot?.()
+          const currentLocaleId = typeof localeSnapshot === 'string'
+            ? localeSnapshot
+            : (localeSnapshot?.locale ?? localeSnapshot?.id ?? 'zh')
 
           const fetchHosts = React.useCallback(async (showSpinner = false) => {
             if (showSpinner) setLoading(true)
@@ -1263,7 +1512,7 @@ window.__ModuleLoader__.load({
           }, [fetchHosts, hasActiveTransition])
 
           const activeAuthPrompt = manualPrompt ||
-            data.hosts.map((item) => item.authPrompt).find((p) => p && p.id !== dismissedPromptId) ||
+            data.hosts.map((item) => item.authPrompt).find(Boolean) ||
             null
 
           const handleConnect = async (host, overrideRemotePort) => {
@@ -1328,8 +1577,38 @@ window.__ModuleLoader__.load({
             }
           }
 
-          const handleAuthSubmit = async ({ host, promptId, value, otp }) => {
-            await callHost('auth-submit', { host, promptId, value, otp })
+          const handleSyncPlugin = async (host, pluginName, force = false, onForceComplete) => {
+            const res = await callHost('sync-plugin', { host, pluginName, force })
+            if (res && res.status === 'confirm_required') {
+              setOverwriteModalInfo({
+                ...res,
+                onForceComplete,
+              })
+            }
+            return res
+          }
+
+          const handleConfirmOverwrite = async (info) => {
+            setActionError(null)
+            try {
+              const res = await callHost('sync-plugin', {
+                host: info.host,
+                pluginName: info.pluginName,
+                force: true,
+              })
+              setOverwriteModalInfo(null)
+              if (res && res.status === 'synced' && typeof info.onForceComplete === 'function') {
+                info.onForceComplete(res)
+              }
+              await fetchHosts(false)
+            } catch (err) {
+              setOverwriteModalInfo(null)
+              setActionError(err instanceof Error ? err.message : String(err))
+            }
+          }
+
+          const handleAuthSubmit = async ({ host, promptId, value }) => {
+            await callHost('auth-submit', { host, promptId, value })
             setManualPrompt(null)
             await fetchHosts(false)
           }
@@ -1337,7 +1616,6 @@ window.__ModuleLoader__.load({
           const handleAuthCancel = async () => {
             if (!activeAuthPrompt) return
             const p = activeAuthPrompt
-            setDismissedPromptId(p.id)
             setManualPrompt(null)
             try {
               await callHost('auth-cancel', { host: p.host, promptId: p.id })
@@ -1389,11 +1667,14 @@ window.__ModuleLoader__.load({
                         data.hosts.map((item) => h(HostCard, {
                           key: item.alias,
                           item,
+                          localPlugins: data.localPlugins || [],
+                          localeId: currentLocaleId,
                           onConnect: handleConnect,
                           onDisconnect: handleDisconnect,
                           onOpenBrowser: handleOpenBrowser,
                           onSaveConfig: handleSaveConfig,
                           onKillPortAndReconnect: handleKillPortAndReconnect,
+                          onSyncPlugin: handleSyncPlugin,
                           onOpenAuthModal: (p) => setManualPrompt(p),
                           t,
                         })))),
@@ -1402,6 +1683,13 @@ window.__ModuleLoader__.load({
               promptInfo: activeAuthPrompt,
               onSubmit: handleAuthSubmit,
               onCancel: handleAuthCancel,
+              t,
+            }),
+
+            h(PluginOverwriteModal, {
+              confirmInfo: overwriteModalInfo,
+              onConfirm: handleConfirmOverwrite,
+              onCancel: () => setOverwriteModalInfo(null),
               t,
             }),
 

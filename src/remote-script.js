@@ -6,6 +6,40 @@ export const DEFAULT_NODE_FALLBACK_VERSION = 'v24.14.0'
 export const SHIPPED_PROFILES = new Set(['web', 'acp', 'headless', 'sdk', 'sdk-minimal', 'desktop'])
 
 /**
+ * Shell preamble that re-executes the script inside a login + interactive bash environment
+ * (`bash -lic`) while preserving the original stdin/stdout/stderr descriptors on fd 3/4/5,
+ * so `/etc/profile`, `~/.bash_profile` / `~/.profile`, and `~/.bashrc` (including guards
+ * checking `case $- in *i*)` or `$PS1`) execute exactly like a normal interactive SSH login
+ * without polluting stdout or consuming stdin.
+ */
+export const LOGIN_ENV_PREAMBLE = `
+if [ "$DSH_RC_ENV_LOADED" != "1" ]; then
+  export DSH_RC_ENV_LOADED=1
+  if command -v bash >/dev/null 2>&1; then
+    exec 3<&0 4>&1 5>&2
+    exec bash -lic '
+      if [ -f "$HOME/.bashrc" ]; then
+        PROFILE_FILE=""
+        if [ -f "$HOME/.bash_profile" ]; then PROFILE_FILE="$HOME/.bash_profile"
+        elif [ -f "$HOME/.bash_login" ]; then PROFILE_FILE="$HOME/.bash_login"
+        elif [ -f "$HOME/.profile" ]; then PROFILE_FILE="$HOME/.profile"
+        fi
+        if [ -z "$PROFILE_FILE" ] || ! grep -q "bashrc" "$PROFILE_FILE" 2>/dev/null; then
+          . "$HOME/.bashrc" >/dev/null 2>&1 || true
+        fi
+      fi
+      exec 0<&3 1>&4 2>&5 3<&- 4<&- 5<&-
+      exec bash "$0" "$@"
+    ' "$0" "$@" </dev/null >/dev/null 2>&1
+  else
+    if [ -f /etc/profile ]; then . /etc/profile </dev/null >/dev/null 2>&1 || true; fi
+    if [ -f "$HOME/.profile" ]; then . "$HOME/.profile" </dev/null >/dev/null 2>&1 || true; fi
+  fi
+fi
+rm -f "$0" 2>/dev/null || true
+`.trim()
+
+/**
  * Build the remote shell command that terminates a process occupying a specific TCP port.
  * Only kills a process owned by the current remote user listening on `port`.
  * @param {number} port
@@ -17,6 +51,7 @@ export function buildKillRemotePortScript(port) {
     throw new Error(`Invalid remote port: ${String(port)}`)
   }
   const script = `
+${LOGIN_ENV_PREAMBLE}
 set -e
 PORT=${safePort}
 PIDS=""
@@ -54,7 +89,7 @@ rm -f "$HOME/.dsh-remote-connect/run/dsh-$PORT.pid" 2>/dev/null || true
 printf '%s\\n' '${EVENT_PREFIX}{"type":"kill_result","ok":true}'
 `
   const encoded = Buffer.from(script, 'utf8').toString('base64')
-  return `sh -c 'eval "$(printf %s "${encoded}" | base64 -d)"'`
+  return `mkdir -p ~/.dsh-remote-connect && printf %s ${encoded} | base64 -d > ~/.dsh-remote-connect/.kill-$$.sh && exec sh ~/.dsh-remote-connect/.kill-$$.sh`
 }
 
 /**
@@ -302,6 +337,7 @@ function checkPortInUse(port) {
   const supervisorB64 = Buffer.from(supervisorJs, 'utf8').toString('base64')
 
   const script = `
+${LOGIN_ENV_PREAMBLE}
 set -e
 
 PREFIX='${EVENT_PREFIX}'
@@ -373,8 +409,8 @@ test_node_candidate() {
 SELECTED_NODE=""
 if [ "$FORCE_INSTALL_NODE" != "1" ]; then
   for CAND in \\
-    "$BASE_DIR/node/current/bin/node" \\
     "$(command -v node 2>/dev/null || true)" \\
+    "$BASE_DIR/node/current/bin/node" \\
     "$HOME/.volta/bin/node" \\
     "$HOME/.local/bin/node" \\
     "/usr/local/bin/node" \\
@@ -460,7 +496,7 @@ if [ -z "$SELECTED_NODE" ]; then
 fi
 
 NODE_BIN_DIR=$(dirname "$SELECTED_NODE")
-export PATH="$NODE_BIN_DIR:$PATH"
+export PATH="$NODE_BIN_DIR:$BASE_DIR/pnpm/bin:$HOME/.local/bin:$PATH"
 
 prune_old_versions() {
   # Keep at most $MAX_VERSIONS version directories in $BASE_DIR, deleting oldest first.
@@ -562,6 +598,6 @@ exec "$SELECTED_NODE" -e "$SUPERVISOR_CODE"
 `.trim()
 
   const encodedScript = Buffer.from(script, 'utf8').toString('base64')
-  const sshCommand = `sh -c 'eval "$(printf %s "${encodedScript}" | base64 -d)"'`
+  const sshCommand = `mkdir -p ~/.dsh-remote-connect && printf %s ${encodedScript} | base64 -d > ~/.dsh-remote-connect/.boot-$$.sh && exec sh ~/.dsh-remote-connect/.boot-$$.sh`
   return { script, supervisorJs, sshCommand }
 }
