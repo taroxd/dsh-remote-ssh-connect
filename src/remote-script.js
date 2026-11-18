@@ -1,6 +1,8 @@
 // Generates the remote POSIX shell + Node.js supervisor scripts executed over SSH
 // on the remote Linux host.
 
+import { gzipSync } from 'node:zlib'
+
 export const EVENT_PREFIX = 'DSH_RC_EVENT:'
 export const DEFAULT_NODE_FALLBACK_VERSION = 'v24.14.0'
 export const SHIPPED_PROFILES = new Set(['web', 'acp', 'headless', 'sdk', 'sdk-minimal', 'desktop'])
@@ -147,6 +149,9 @@ const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
 const readline = require('node:readline');
+const zlib = require('node:zlib');
+
+try { fs.unlinkSync(__filename); } catch {}
 
 const PREFIX = ${JSON.stringify(EVENT_PREFIX)};
 const dshBin = process.env.DSH_RC_BIN;
@@ -312,13 +317,253 @@ function checkPortInUse(port) {
     process.exit(0);
   });
 
+  const homeDir = process.env.HOME || '';
+  const baseDir = path.join(homeDir, '.dsh-remote-connect');
+  const profileDir = path.join(dshHome, 'profiles', profile);
+  const rpcChunks = new Map();
+
+  function runCommandAsync(cmd, cmdArgs, timeoutMs = 300_000) {
+    return new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      let settled = false;
+      const proc = spawn(cmd, cmdArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: process.env,
+      });
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          try { proc.kill('SIGKILL'); } catch {}
+          resolve({ status: 1, stdout, stderr: stderr + '\\nOperation timed out' });
+        }
+      }, timeoutMs);
+      proc.stdout.setEncoding('utf8');
+      proc.stderr.setEncoding('utf8');
+      proc.stdout.on('data', (c) => { stdout += c; });
+      proc.stderr.on('data', (c) => { stderr += c; });
+      proc.once('error', (err) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ status: 1, stdout, stderr: String(err && err.message ? err.message : err) });
+        }
+      });
+      proc.once('close', (code) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve({ status: code ?? 1, stdout, stderr });
+        }
+      });
+    });
+  }
+
+  async function ensureRemotePnpm() {
+    const check = await runCommandAsync('sh', ['-c', 'command -v pnpm'], 10_000);
+    if (check.status === 0 && check.stdout.trim()) return;
+    const pnpmPrefix = path.join(baseDir, 'pnpm');
+    fs.mkdirSync(pnpmPrefix, { recursive: true });
+    for (const reg of ['https://registry.npmmirror.com/', 'https://registry.npmjs.org/']) {
+      const res = await runCommandAsync('npm', ['install', '--prefix', pnpmPrefix, '-g', 'pnpm', '--registry', reg, '--no-audit', '--no-fund'], 120_000);
+      if (res.status === 0) break;
+    }
+    process.env.PATH = path.join(pnpmPrefix, 'bin') + ':' + (process.env.PATH || '');
+  }
+
+  function handleCheckPlugin(params) {
+    const pkgName = String(params && params.packageName ? params.packageName : '');
+    const profileManifestPath = path.join(profileDir, 'package.json');
+    let installed = false;
+    let remoteVersion = null;
+    let recordedSpec = null;
+
+    if (fs.existsSync(profileManifestPath)) {
+      try {
+        const pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
+        const deps = pm.dependencies || {};
+        const bundles = (pm.dsh && pm.dsh.profile && pm.dsh.profile.bundles) || [];
+        if (Object.prototype.hasOwnProperty.call(deps, pkgName) || bundles.includes(pkgName)) {
+          installed = true;
+          recordedSpec = deps[pkgName] || null;
+        }
+      } catch {}
+    }
+
+    const pkgManifestPath = path.join(profileDir, 'node_modules', ...pkgName.split('/'), 'package.json');
+    if (fs.existsSync(pkgManifestPath)) {
+      try {
+        const pkgM = JSON.parse(fs.readFileSync(pkgManifestPath, 'utf8'));
+        installed = true;
+        if (typeof pkgM.version === 'string') {
+          remoteVersion = pkgM.version.trim();
+        }
+      } catch {}
+    }
+
+    return {
+      packageName: pkgName,
+      installed,
+      remoteVersion,
+      recordedSpec,
+    };
+  }
+
+  async function handleInstallPlugin(reqId, params) {
+    const pkgName = String(params.packageName || '');
+    const sourceKind = String(params.sourceKind || 'npm');
+    const localSubkind = String(params.localSubkind || 'directory');
+    const installSpec = String(params.installSpec || '');
+    const tarballFilename = String(params.tarballFilename || 'plugin.tgz');
+    const reinstall = Boolean(params.reinstall);
+    const safeSlug = pkgName.replace(/[^A-Za-z0-9._-]/g, '_');
+
+    const rawBase64 = (rpcChunks.get(reqId) || []).join('');
+    rpcChunks.delete(reqId);
+
+    await ensureRemotePnpm();
+
+    const runDshPlugin = (pluginArgs) => runCommandAsync(process.execPath, [dshBin, 'plugin', '--profile', profile, ...pluginArgs], 300_000);
+
+    // 1. If already installed on remote, deselect from dsh.profile.bundles first so HMR unloads cleanly, then remove
+    const profileManifestPath = path.join(profileDir, 'package.json');
+    if (reinstall && fs.existsSync(profileManifestPath)) {
+      try {
+        const pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
+        if (pm.dsh && pm.dsh.profile && Array.isArray(pm.dsh.profile.bundles)) {
+          const nextBundles = pm.dsh.profile.bundles.filter((b) => b !== pkgName);
+          if (nextBundles.length !== pm.dsh.profile.bundles.length) {
+            pm.dsh.profile.bundles = nextBundles;
+            fs.writeFileSync(profileManifestPath, JSON.stringify(pm, null, 2) + '\\n');
+            await new Promise((r) => setTimeout(r, 700));
+          }
+        }
+      } catch {}
+      await runDshPlugin(['remove', pkgName]);
+    }
+
+    // 2. Materialize local plugin files if local source
+    let targetSpec = installSpec;
+    if (sourceKind === 'local') {
+      if (!rawBase64) {
+        throw new Error('Empty payload received for local plugin sync');
+      }
+      const stdinBuf = Buffer.from(rawBase64, 'base64');
+      const localPluginsRoot = path.join(baseDir, 'local-plugins');
+      fs.mkdirSync(localPluginsRoot, { recursive: true });
+
+      if (localSubkind === 'tarball') {
+        const baseName = path.basename(tarballFilename);
+        const destTarball = path.join(localPluginsRoot, baseName.startsWith(safeSlug) ? baseName : (safeSlug + '-' + baseName));
+        fs.writeFileSync(destTarball, stdinBuf);
+        targetSpec = 'file:' + destTarball;
+      } else {
+        const destDir = path.join(localPluginsRoot, safeSlug);
+        fs.rmSync(destDir, { recursive: true, force: true });
+        fs.mkdirSync(destDir, { recursive: true });
+        const unpacked = JSON.parse(zlib.gunzipSync(stdinBuf).toString('utf8'));
+        for (const fileEntry of unpacked.files || []) {
+          const rel = String(fileEntry.path || '').replace(/^\\/+/, '');
+          if (!rel || rel.includes('..')) continue;
+          const fullPath = path.join(destDir, ...rel.split('/'));
+          fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+          fs.writeFileSync(fullPath, Buffer.from(fileEntry.data, 'base64'), {
+            mode: fileEntry.mode || 0o644,
+          });
+        }
+        targetSpec = destDir;
+      }
+    }
+
+    // 3. Install via dsh plugin --profile <profile> add <targetSpec>
+    let addRes;
+    if (sourceKind === 'npm') {
+      for (const reg of [null, 'https://registry.npmmirror.com/', 'https://registry.npmjs.org/']) {
+        const addArgs = ['add', targetSpec, '--save-exact', ...(reg ? ['--registry=' + reg] : [])];
+        addRes = await runDshPlugin(addArgs);
+        if (addRes.status === 0) break;
+      }
+    } else {
+      addRes = await runDshPlugin(['add', targetSpec]);
+      if (addRes.status !== 0 && sourceKind === 'github') {
+        const wsPath = path.join(profileDir, 'pnpm-workspace.yaml');
+        if (fs.existsSync(wsPath)) {
+          const wsContent = fs.readFileSync(wsPath, 'utf8');
+          if (!wsContent.includes('dangerouslyAllowAllBuilds')) {
+            fs.writeFileSync(wsPath, wsContent.trimEnd() + '\\ndangerouslyAllowAllBuilds: true\\n');
+            addRes = await runDshPlugin(['add', targetSpec]);
+          }
+        }
+      }
+    }
+
+    if (!addRes || addRes.status !== 0) {
+      const errOut = ((addRes && (addRes.stderr || addRes.stdout)) || 'dsh plugin add failed').trim();
+      throw new Error(errOut);
+    }
+
+    let installedVersion = null;
+    const pkgManifestPath = path.join(profileDir, 'node_modules', ...pkgName.split('/'), 'package.json');
+    if (fs.existsSync(pkgManifestPath)) {
+      try {
+        const pkgM = JSON.parse(fs.readFileSync(pkgManifestPath, 'utf8'));
+        installedVersion = pkgM.version || null;
+      } catch {}
+    }
+
+    return {
+      packageName: pkgName,
+      installedVersion,
+      sourceKind,
+      reinstalled: reinstall,
+    };
+  }
+
   process.stdin.setEncoding('utf8');
   readline.createInterface({ input: process.stdin }).on('line', (line) => {
     const cmd = line.trim();
+    if (!cmd) return;
     if (cmd === 'SHUTDOWN') {
       terminateChild('client_shutdown');
-    } else if (cmd === 'PING') {
+      return;
+    }
+    if (cmd === 'PING') {
       emit({ type: 'pong', ts: Date.now() });
+      return;
+    }
+    if (cmd.startsWith('RPC_CHUNK:')) {
+      try {
+        const chunkObj = JSON.parse(cmd.slice('RPC_CHUNK:'.length));
+        if (chunkObj && chunkObj.id && typeof chunkObj.data === 'string') {
+          if (!rpcChunks.has(chunkObj.id)) rpcChunks.set(chunkObj.id, []);
+          rpcChunks.get(chunkObj.id).push(chunkObj.data);
+        }
+      } catch {}
+      return;
+    }
+    if (cmd.startsWith('RPC:')) {
+      let req;
+      try {
+        req = JSON.parse(cmd.slice('RPC:'.length));
+      } catch {
+        return;
+      }
+      if (!req || !req.id) return;
+      Promise.resolve().then(async () => {
+        if (req.method === 'check_plugin') {
+          return handleCheckPlugin(req.params || {});
+        }
+        if (req.method === 'install_plugin') {
+          return await handleInstallPlugin(req.id, req.params || {});
+        }
+        throw new Error('Unknown RPC method: ' + String(req.method));
+      }).then(
+        (value) => emit({ type: 'rpc_result', id: req.id, ok: true, value }),
+        (err) => {
+          rpcChunks.delete(req.id);
+          emit({ type: 'rpc_result', id: req.id, ok: false, error: String(err && err.message ? err.message : err) });
+        },
+      );
     }
   });
   process.stdin.on('end', () => terminateChild('stdin_eof'));
@@ -333,8 +578,6 @@ function checkPortInUse(port) {
   process.exit(1);
 });
 `.trim()
-
-  const supervisorB64 = Buffer.from(supervisorJs, 'utf8').toString('base64')
 
   const script = `
 ${LOGIN_ENV_PREAMBLE}
@@ -593,11 +836,14 @@ export DSH_RC_REMOTE_PORT="$REMOTE_PORT"
 export DSH_RC_LOCAL_PORT="$LOCAL_PORT"
 export DSH_RC_PID_FILE="$BASE_DIR/run/dsh-$REMOTE_PORT.pid"
 
-SUPERVISOR_CODE=$(printf '%s' '${supervisorB64}' | base64 -d)
-exec "$SELECTED_NODE" -e "$SUPERVISOR_CODE"
+SUPERVISOR_FILE="$BASE_DIR/run/.sup-$$.cjs"
+cat > "$SUPERVISOR_FILE" << 'DSH_RC_SUPERVISOR_EOF'
+${supervisorJs}
+DSH_RC_SUPERVISOR_EOF
+exec "$SELECTED_NODE" "$SUPERVISOR_FILE"
 `.trim()
 
-  const encodedScript = Buffer.from(script, 'utf8').toString('base64')
-  const sshCommand = `mkdir -p ~/.dsh-remote-connect && printf %s ${encodedScript} | base64 -d > ~/.dsh-remote-connect/.boot-$$.sh && exec sh ~/.dsh-remote-connect/.boot-$$.sh`
-  return { script, supervisorJs, sshCommand }
+  const encodedScript = gzipSync(Buffer.from(script, 'utf8')).toString('base64')
+  const sshCommand = 'mkdir -p ~/.dsh-remote-connect && IFS= read -r B && printf %s "$B" | base64 -d | gzip -d > ~/.dsh-remote-connect/.boot-$$.sh && exec sh ~/.dsh-remote-connect/.boot-$$.sh'
+  return { script, supervisorJs, encodedScript, sshCommand }
 }

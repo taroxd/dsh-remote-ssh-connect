@@ -160,7 +160,7 @@ Match host 203.0.113.*
 
   // 5. Remote bootstrap & kill script generation
   {
-    const { script, supervisorJs, sshCommand } = buildRemoteBootstrapScript({
+    const { script, supervisorJs, encodedScript, sshCommand } = buildRemoteBootstrapScript({
       dshVersion: '0.2.2-rc.3',
       remotePort: 3080,
       localPort: 54321,
@@ -173,7 +173,10 @@ Match host 203.0.113.*
     assert.equal(script.includes('MAX_VERSIONS=3'), true)
     assert.equal(script.includes('bash -lic'), true)
     assert.equal(script.includes('.bashrc'), true)
-    assert.equal(sshCommand.startsWith('mkdir -p ~/.dsh-remote-connect && printf %s '), true)
+    assert.equal(typeof encodedScript, 'string')
+    assert.ok(encodedScript.length > 100)
+    assert.equal(sshCommand.startsWith('mkdir -p ~/.dsh-remote-connect && IFS= read -r B'), true)
+    assert.ok(sshCommand.length < 250, 'sshCommand must stay compact to avoid ENAMETOOLONG on Windows')
 
     const killCmd = buildKillRemotePortScript(3080)
     assert.equal(killCmd.startsWith('mkdir -p ~/.dsh-remote-connect && printf %s '), true)
@@ -600,8 +603,10 @@ Match host 203.0.113.*
         ['my-local-bundle', { installed: false, remoteVersion: null }],   // not installed on remote
       ])
       const installCalls = []
+      let sshSpawnCount = 0
 
-      const mockSpawn = (_cmd, args) => {
+      const mockSpawn = (_cmd, _args) => {
+        sshSpawnCount += 1
         const child = new EventEmitter()
         child.stdin = new PassThrough()
         child.stdout = new PassThrough()
@@ -614,61 +619,66 @@ Match host 203.0.113.*
           child.emit('close', 0)
         }
 
-        if (args.includes('-L')) {
-          setTimeout(() => {
-            child.stdout.write(`${EVENT_PREFIX}{"type":"ready","url":"http://127.0.0.1:43333/?token=t","remotePort":3080,"localPort":43333,"profile":"web","pid":1111}\n`)
-          }, 10)
-          child.stdin.on('data', (c) => {
-            if (String(c).includes('SHUTDOWN')) {
+        setTimeout(() => {
+          child.stdout.write(`${EVENT_PREFIX}{"type":"ready","url":"http://127.0.0.1:43333/?token=t","remotePort":3080,"localPort":43333,"profile":"web","pid":1111}\n`)
+        }, 10)
+
+        const chunksById = new Map()
+        let lineBuf = ''
+        child.stdin.on('data', (chunk) => {
+          lineBuf += String(chunk)
+          const lines = lineBuf.split('\n')
+          lineBuf = lines.pop() ?? ''
+          for (const rawLine of lines) {
+            const cmd = rawLine.trim()
+            if (cmd === 'SHUTDOWN') {
               child.exitCode = 0
               child.emit('close', 0)
+              return
             }
-          })
-          return child
-        }
-
-        // Decode remote command to determine whether it's plugin_check or plugin_synced
-        const remoteCmd = args.at(-1) || ''
-        const b64Match = /printf %s ([A-Za-z0-9+/=]+) \| base64 -d/.exec(remoteCmd)
-        const outerScript = b64Match ? Buffer.from(b64Match[1], 'base64').toString('utf8') : ''
-        const innerMatch = /printf %s '([A-Za-z0-9+/=]+)' \| base64 -d/.exec(outerScript)
-        const innerJs = innerMatch ? Buffer.from(innerMatch[1], 'base64').toString('utf8') : ''
-
-        let stdinLen = 0
-        child.stdin.on('data', (chunk) => {
-          stdinLen += chunk.length
-        })
-        child.stdin.on('end', () => {
-          if (innerJs.includes("type: 'plugin_check'")) {
-            const pkgMatch = /const pkgName = "([^"]+)"/.exec(innerJs)
-            const pkgName = pkgMatch ? pkgMatch[1] : ''
-            const st = remotePluginsState.get(pkgName) || { installed: false, remoteVersion: null }
-            child.stdout.write(`${EVENT_PREFIX}${JSON.stringify({
-              type: 'plugin_check',
-              packageName: pkgName,
-              installed: st.installed,
-              remoteVersion: st.remoteVersion,
-            })}\n`)
-            child.exitCode = 0
-            child.emit('close', 0)
-          } else {
-            const pkgMatch = /const pkgName = "([^"]+)"/.exec(innerJs)
-            const kindMatch = /const sourceKind = "([^"]+)"/.exec(innerJs)
-            const reinstallMatch = /const reinstall = (true|false)/.exec(innerJs)
-            const pkgName = pkgMatch ? pkgMatch[1] : ''
-            const sourceKind = kindMatch ? kindMatch[1] : ''
-            const reinstall = reinstallMatch ? reinstallMatch[1] === 'true' : false
-            installCalls.push({ pkgName, sourceKind, reinstall, stdinLen })
-            child.stdout.write(`${EVENT_PREFIX}${JSON.stringify({
-              type: 'plugin_synced',
-              ok: true,
-              packageName: pkgName,
-              installedVersion: 'synced-ver',
-              sourceKind,
-              reinstalled: reinstall,
-            })}\n`)
-            child.exitCode = 0
-            child.emit('close', 0)
+            if (cmd.startsWith('RPC_CHUNK:')) {
+              const c = JSON.parse(cmd.slice('RPC_CHUNK:'.length))
+              if (!chunksById.has(c.id)) chunksById.set(c.id, [])
+              chunksById.get(c.id).push(c.data)
+              continue
+            }
+            if (cmd.startsWith('RPC:')) {
+              const req = JSON.parse(cmd.slice('RPC:'.length))
+              if (req.method === 'check_plugin') {
+                const pkgName = req.params.packageName
+                const st = remotePluginsState.get(pkgName) || { installed: false, remoteVersion: null }
+                child.stdout.write(`${EVENT_PREFIX}${JSON.stringify({
+                  type: 'rpc_result',
+                  id: req.id,
+                  ok: true,
+                  value: {
+                    packageName: pkgName,
+                    installed: st.installed,
+                    remoteVersion: st.remoteVersion,
+                  },
+                })}\n`)
+              } else if (req.method === 'install_plugin') {
+                const rawB64 = (chunksById.get(req.id) || []).join('')
+                chunksById.delete(req.id)
+                installCalls.push({
+                  pkgName: req.params.packageName,
+                  sourceKind: req.params.sourceKind,
+                  reinstall: req.params.reinstall,
+                  payloadLen: rawB64.length,
+                })
+                child.stdout.write(`${EVENT_PREFIX}${JSON.stringify({
+                  type: 'rpc_result',
+                  id: req.id,
+                  ok: true,
+                  value: {
+                    packageName: req.params.packageName,
+                    installedVersion: 'synced-ver',
+                    sourceKind: req.params.sourceKind,
+                    reinstalled: req.params.reinstall,
+                  },
+                })}\n`)
+              }
+            }
           }
         })
 
@@ -685,13 +695,14 @@ Match host 203.0.113.*
       await manager.init()
       try {
         await manager.connectHost('sync-box', { waitForReady: true })
+        assert.equal(sshSpawnCount, 1, 'Only 1 SSH connection should be opened')
 
-        // Case A: Not installed on remote (local source) -> installs directly with streamed stdin payload
+        // Case A: Not installed on remote (local source) -> installs directly over existing SSH stdin channel
         const resLocal = await manager.syncPluginToHost('sync-box', { pluginName: 'my-local-bundle' })
         assert.equal(resLocal.status, 'synced')
         assert.equal(resLocal.sourceKind, 'local')
         assert.equal(resLocal.reinstalled, false)
-        assert.ok(installCalls.at(-1).stdinLen > 0)
+        assert.ok(installCalls.at(-1).payloadLen > 0)
 
         // Case B: Installed on remote with version 1.9.0 <= local 2.0.0 -> deletes & reinstalls directly without confirmation
         const resNpm = await manager.syncPluginToHost('sync-box', { pluginName: 'demo-npm-bundle' })
@@ -713,6 +724,13 @@ Match host 203.0.113.*
         assert.equal(resGhForce.reinstalled, true)
         assert.equal(resGhForce.previousRemoteVersion, '3.0.0')
         assert.equal(installCalls.some((c) => c.pkgName === 'demo-gh-bundle' && c.reinstall === true), true)
+
+        assert.equal(sshSpawnCount, 1, 'Syncing plugins must reuse existing SSH session and never spawn extra SSH processes')
+
+        // Also verify cancelAuth on an already-connected host never disconnects it
+        const cancelOnConnected = await manager.cancelAuth('sync-box', {})
+        assert.equal(cancelOnConnected.disconnected, false)
+        assert.equal((await manager.getHostStatus('sync-box')).status, 'connected')
 
         await manager.disconnectHost('sync-box')
       } finally {

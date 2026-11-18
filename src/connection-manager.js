@@ -2,6 +2,7 @@
 // remote Node/DSH provisioning, port-conflict recovery, and process lifecycle.
 
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -11,8 +12,6 @@ import { createInterface } from 'node:readline'
 import { AskpassCoordinator } from './askpass-server.js'
 import { openUrlInDefaultBrowser } from './browser-opener.js'
 import {
-  buildRemoteCheckPluginScript,
-  buildRemoteInstallPluginScript,
   comparePluginVersions,
   listLocalPlugins,
   packLocalPluginDirectory,
@@ -344,7 +343,7 @@ export class RemoteConnectionManager {
       return this.getHostStatus(hostKey)
     }
 
-    const { sshCommand } = buildRemoteBootstrapScript({
+    const { sshCommand, encodedScript } = buildRemoteBootstrapScript({
       dshVersion: this.dshVersion,
       remotePort: cfg.remotePort,
       localPort: allocatedLocalPort,
@@ -381,8 +380,17 @@ export class RemoteConnectionManager {
       readyPromise,
       resolveReady,
       userDisconnecting: false,
+      pendingRpcs: new Map(),
     }
     this.sessions.set(hostKey, session)
+
+    const rejectAllPendingRpcs = (reason) => {
+      for (const [, pending] of session.pendingRpcs.entries()) {
+        clearTimeout(pending.timer)
+        pending.reject(new Error(reason))
+      }
+      session.pendingRpcs.clear()
+    }
 
     const appendLog = (line) => {
       if (!line) return
@@ -432,6 +440,9 @@ export class RemoteConnectionManager {
     }
 
     session.child = child
+    if (child.stdin?.writable && encodedScript) {
+      child.stdin.write(`${encodedScript}\n`)
+    }
 
     const handleEvent = (ev) => {
       if (!ev || typeof ev !== 'object') return
@@ -500,6 +511,19 @@ export class RemoteConnectionManager {
         resolveReady(session)
         return
       }
+      if (ev.type === 'rpc_result' && ev.id) {
+        const pending = session.pendingRpcs.get(ev.id)
+        if (pending) {
+          clearTimeout(pending.timer)
+          session.pendingRpcs.delete(ev.id)
+          if (ev.ok) {
+            pending.resolve(ev.value)
+          } else {
+            pending.reject(new Error(ev.error || 'Remote operation failed'))
+          }
+        }
+        return
+      }
       if (ev.type === 'log' && ev.line) {
         appendLog(ev.line)
       }
@@ -545,6 +569,7 @@ export class RemoteConnectionManager {
         session.keepaliveTimer = null
       }
       askpassSession.dispose()
+      rejectAllPendingRpcs(err instanceof Error ? err.message : String(err))
       if (!session.userDisconnecting) {
         session.status = 'error'
         session.phase = 'idle'
@@ -562,6 +587,7 @@ export class RemoteConnectionManager {
         session.keepaliveTimer = null
       }
       askpassSession.dispose()
+      rejectAllPendingRpcs(`SSH connection closed (code ${String(code)})`)
       if (session.userDisconnecting) {
         session.status = 'disconnected'
         session.phase = 'idle'
@@ -676,7 +702,9 @@ export class RemoteConnectionManager {
   }
 
   /**
-   * Cancel interactive authentication and immediately terminate the SSH connection for `host`.
+   * Cancel interactive authentication. If `host` is still in the initial login/connecting
+   * phase (`status === 'connecting'`), immediately terminate the SSH connection attempt;
+   * never disconnect an already-connected host.
    * @param {string} host
    * @param {object} [payload]
    * @param {string} [payload.promptId]
@@ -684,8 +712,12 @@ export class RemoteConnectionManager {
   async cancelAuth(host, payload = {}) {
     const hostKey = String(host || '').trim()
     this.askpass.cancelForHost(hostKey, payload.promptId)
-    await this.disconnectHost(hostKey)
-    return { ok: true, disconnected: true }
+    const sess = this.sessions.get(hostKey)
+    if (sess && sess.status === 'connecting') {
+      await this.disconnectHost(hostKey)
+      return { ok: true, disconnected: true }
+    }
+    return { ok: true, disconnected: false }
   }
 
   /**
@@ -768,86 +800,53 @@ export class RemoteConnectionManager {
   }
 
   /**
-   * Run a short-lived SSH command on `host`, optionally piping `stdinBuffer`, and parse `DSH_RC_EVENT:` records.
-   * @param {string} hostKey
-   * @param {string} remoteCmd
-   * @param {Buffer | null} [stdinBuffer]
-   * @returns {Promise<{ events: object[], stdout: string, stderr: string, exitCode: number }>}
+   * Send a JSON RPC command over the existing long-lived SSH session's stdin to the remote
+   * Node supervisor and await its `rpc_result` event on stdout. Reuses the already-authenticated
+   * SSH connection so no additional password or OTP prompts are triggered.
+   *
+   * @param {object} session
+   * @param {string} method
+   * @param {object} [params]
+   * @param {string | null} [base64Payload]
+   * @param {number} [timeoutMs]
+   * @returns {Promise<any>}
    */
-  async _runRemoteCommand(hostKey, remoteCmd, stdinBuffer = null) {
-    await this.askpass.start()
-    const askpassSession = this.askpass.createSessionEnv(hostKey)
-    const sshArgs = [
-      '-T',
-      '-o', 'BatchMode=no',
-      '-o', 'StrictHostKeyChecking=accept-new',
-      '-o', 'ConnectTimeout=20',
-      ...this.extraSshArgs,
-      '--',
-      hostKey,
-      remoteCmd,
-    ]
-
-    try {
-      return await new Promise((resolve, reject) => {
-        const child = this.spawnProcess(this.sshExecutable, sshArgs, {
-          stdio: ['pipe', 'pipe', 'pipe'],
-          windowsHide: true,
-          env: {
-            ...process.env,
-            ...askpassSession.env,
-          },
-        })
-
-        const events = []
-        let stdout = ''
-        let stderr = ''
-
-        createInterface({ input: child.stdout }).on('line', (line) => {
-          const trimmed = line.trim()
-          if (!trimmed) return
-          const idx = trimmed.indexOf(EVENT_PREFIX)
-          if (idx !== -1) {
-            try {
-              events.push(JSON.parse(trimmed.slice(idx + EVENT_PREFIX.length)))
-              return
-            } catch {
-              /* fall through */
-            }
-          }
-          stdout += `${trimmed}\n`
-        })
-
-        createInterface({ input: child.stderr }).on('line', (line) => {
-          const trimmed = line.trim()
-          if (trimmed) stderr += `${trimmed}\n`
-        })
-
-        child.once('error', reject)
-        child.once('close', (code) => {
-          resolve({
-            events,
-            stdout: stdout.trim(),
-            stderr: stderr.trim(),
-            exitCode: code ?? 1,
-          })
-        })
-
-        if (stdinBuffer && stdinBuffer.length > 0) {
-          child.stdin.end(stdinBuffer)
-        } else {
-          child.stdin.end()
-        }
-      })
-    } finally {
-      askpassSession.dispose()
+  _sendSessionRpc(session, method, params = {}, base64Payload = null, timeoutMs = 300_000) {
+    if (!session || session.status !== 'connected' || !session.child || session.child.killed || !session.child.stdin?.writable) {
+      return Promise.reject(new Error(`Host "${session?.host || ''}" does not have an active SSH control channel.`))
     }
+
+    const id = randomUUID()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        session.pendingRpcs.delete(id)
+        reject(new Error(`Remote operation "${method}" timed out after ${Math.round(timeoutMs / 1000)}s`))
+      }, timeoutMs)
+
+      session.pendingRpcs.set(id, { resolve, reject, timer })
+
+      try {
+        if (typeof base64Payload === 'string' && base64Payload.length > 0) {
+          const CHUNK_SIZE = 32768
+          for (let offset = 0; offset < base64Payload.length; offset += CHUNK_SIZE) {
+            const slice = base64Payload.slice(offset, offset + CHUNK_SIZE)
+            session.child.stdin.write(`RPC_CHUNK:${JSON.stringify({ id, data: slice })}\n`)
+          }
+        }
+        session.child.stdin.write(`RPC:${JSON.stringify({ id, method, params })}\n`)
+      } catch (err) {
+        clearTimeout(timer)
+        session.pendingRpcs.delete(id)
+        reject(err instanceof Error ? err : new Error(String(err)))
+      }
+    })
   }
 
   /**
    * Synchronize a locally installed plugin to a connected remote host using the same
-   * installation method (`npm`, `github`, or `local`).
+   * installation method (`npm`, `github`, or `local`) over the existing long-lived SSH connection.
    *
+   * - Reuses the already-authenticated SSH control channel (zero extra SSH connections or auth prompts).
    * - If the plugin is not installed on the remote, installs it directly.
    * - If the plugin is already installed on the remote and `remoteVersion <= localVersion`,
    *   deletes the remote plugin and reinstalls it directly.
@@ -880,23 +879,15 @@ export class RemoteConnectionManager {
     }
 
     const remoteProfile = sess.activeProfile || 'web'
-    const dshVersion = sess.dshVersion || this.dshVersion
 
-    // Step 1: Check whether the plugin is already installed on the remote profile
-    const checkCmd = buildRemoteCheckPluginScript({
-      dshVersion,
-      profile: remoteProfile,
+    // Step 1: Check whether the plugin is already installed on the remote profile via the active SSH channel
+    const checkResult = await this._sendSessionRpc(sess, 'check_plugin', {
       packageName: localPlugin.name,
     })
-    const checkRun = await this._runRemoteCommand(hostKey, checkCmd, null)
-    const checkEvent = checkRun.events.find((e) => e.type === 'plugin_check')
-    if (!checkEvent && checkRun.exitCode !== 0) {
-      throw new Error(checkRun.stderr || checkRun.stdout || `Failed to inspect remote profile "${remoteProfile}" on ${hostKey}.`)
-    }
 
-    const remoteInstalled = Boolean(checkEvent?.installed)
-    const remoteVersion = typeof checkEvent?.remoteVersion === 'string' && checkEvent.remoteVersion.trim() !== ''
-      ? checkEvent.remoteVersion.trim()
+    const remoteInstalled = Boolean(checkResult?.installed)
+    const remoteVersion = typeof checkResult?.remoteVersion === 'string' && checkResult.remoteVersion.trim() !== ''
+      ? checkResult.remoteVersion.trim()
       : null
 
     // Step 2: Compare versions if already installed on remote
@@ -917,41 +908,34 @@ export class RemoteConnectionManager {
     }
 
     // Step 3: Prepare base64 payload for local-source plugins
-    let stdinBuffer = null
+    let base64Payload = null
     let tarballFilename = 'plugin.tgz'
     if (localPlugin.sourceKind === 'local') {
       if (localPlugin.localSubkind === 'tarball') {
         const rawTgz = await readFile(localPlugin.localPath)
-        stdinBuffer = Buffer.from(rawTgz.toString('base64'), 'utf8')
+        base64Payload = rawTgz.toString('base64')
         tarballFilename = basename(localPlugin.localPath)
       } else {
         const packed = await packLocalPluginDirectory(localPlugin.localPath)
-        stdinBuffer = Buffer.from(packed.toString('base64'), 'utf8')
+        base64Payload = packed.toString('base64')
       }
     }
 
-    // Step 4: Remove existing (if installed) and install on remote
-    const installCmd = buildRemoteInstallPluginScript({
-      dshVersion,
-      profile: remoteProfile,
-      packageName: localPlugin.name,
-      sourceKind: localPlugin.sourceKind,
-      localSubkind: localPlugin.localSubkind,
-      localLinkPrefix: localPlugin.localLinkPrefix,
-      installSpec: localPlugin.installSpec,
-      tarballFilename,
-      reinstall: remoteInstalled,
-    })
-
-    const installRun = await this._runRemoteCommand(hostKey, installCmd, stdinBuffer)
-    const errEvent = installRun.events.find((e) => e.type === 'plugin_sync_error')
-    if (errEvent) {
-      throw new Error(errEvent.message || `Failed to sync plugin "${localPlugin.name}" to ${hostKey}.`)
-    }
-    const syncedEvent = installRun.events.find((e) => e.type === 'plugin_synced')
-    if (!syncedEvent && installRun.exitCode !== 0) {
-      throw new Error(installRun.stderr || installRun.stdout || `Failed to sync plugin "${localPlugin.name}" to ${hostKey}.`)
-    }
+    // Step 4: Remove existing (if installed) and install on remote via the active SSH channel
+    const syncedResult = await this._sendSessionRpc(
+      sess,
+      'install_plugin',
+      {
+        packageName: localPlugin.name,
+        sourceKind: localPlugin.sourceKind,
+        localSubkind: localPlugin.localSubkind,
+        localLinkPrefix: localPlugin.localLinkPrefix,
+        installSpec: localPlugin.installSpec,
+        tarballFilename,
+        reinstall: remoteInstalled,
+      },
+      base64Payload,
+    )
 
     return {
       status: 'synced',
@@ -961,7 +945,7 @@ export class RemoteConnectionManager {
       pluginTitle: localPlugin.title,
       sourceKind: localPlugin.sourceKind,
       localVersion: localPlugin.version,
-      installedVersion: syncedEvent?.installedVersion || localPlugin.version,
+      installedVersion: syncedResult?.installedVersion || localPlugin.version,
       previousRemoteVersion: remoteVersion,
       reinstalled: remoteInstalled,
     }
