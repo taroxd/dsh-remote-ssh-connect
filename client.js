@@ -12,6 +12,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'remote-connect'
 
     const zh = {
+      _lang: 'zh',
       panel: 'SSH 连接',
       title: 'SSH 远端连接管理',
       subtitle: '管理 ~/.ssh/config 中的 Linux 主机，通过 SSH 自动部署同版本 DSH、同步本地插件并建立本地端口映射',
@@ -122,6 +123,7 @@ window.__ModuleLoader__.load({
     }
 
     const en = {
+      _lang: 'en',
       panel: 'SSH connect',
       title: 'Remote SSH connections',
       subtitle: 'Manage Linux hosts from ~/.ssh/config, provision matching DSH versions over SSH, sync local plugins, and forward ports locally',
@@ -957,74 +959,12 @@ window.__ModuleLoader__.load({
           }, submitting ? t('btnConfirmingOverwrite') : t('btnConfirmOverwrite')))))
     }
 
-    function UrlFallbackModal({ info, onClose, t }) {
-      const [copied, setCopied] = React.useState(false)
-
-      React.useEffect(() => {
-        const onKeyDown = (e) => {
-          if (e.key === 'Escape') onClose()
-        }
-        window.addEventListener('keydown', onKeyDown)
-        return () => window.removeEventListener('keydown', onKeyDown)
-      }, [onClose])
-
-      if (!info) return null
-
-      const copyUrl = async () => {
-        try {
-          await navigator.clipboard.writeText(info.url)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 2000)
-        } catch {
-          /* ignore */
-        }
-      }
-
-      return h('div', {
-        className: 'dsh-rc-modal-backdrop',
-        role: 'dialog',
-        'aria-modal': 'true',
-        onClick: (e) => { if (e.target === e.currentTarget) onClose() },
-      },
-      h('div', { className: 'dsh-rc-modal' },
-        h('h3', { className: 'dsh-rc-modal-title' }, t('urlModalTitle', { host: info.host })),
-        h('p', { className: 'dsh-rc-modal-desc' },
-          info.reason
-            ? t('urlModalFallbackDesc', { reason: info.reason })
-            : t('urlModalManualDesc')),
-        h('div', { className: 'dsh-rc-prompt-box' },
-          h('a', {
-            href: info.url,
-            target: '_blank',
-            rel: 'noopener noreferrer',
-            className: 'dsh-rc-url-link',
-          }, info.url)),
-        h('div', { className: 'dsh-rc-modal-actions' },
-          h('button', {
-            type: 'button',
-            className: 'dsh-rc-btn',
-            onClick: copyUrl,
-          }, copied ? t('urlCopied') : t('btnCopyUrl')),
-          h('a', {
-            href: info.url,
-            target: '_blank',
-            rel: 'noopener noreferrer',
-            className: 'dsh-rc-btn dsh-rc-btn-primary',
-          }, t('btnOpenInNewTab')),
-          h('button', {
-            type: 'button',
-            className: 'dsh-rc-btn',
-            onClick: onClose,
-          }, t('btnCloseModal')))))
-    }
-
     function HostCard({
       item,
       localPlugins,
       localeId,
       onConnect,
       onDisconnect,
-      onOpenBrowser,
       onSaveConfig,
       onKillPortAndReconnect,
       onSyncPlugin,
@@ -1044,7 +984,6 @@ window.__ModuleLoader__.load({
       const [killingPort, setKillingPort] = React.useState(false)
       const [changingPort, setChangingPort] = React.useState(false)
       const [copiedUrl, setCopiedUrl] = React.useState(false)
-      const [browserNotice, setBrowserNotice] = React.useState(null)
 
       const [selectedPlugin, setSelectedPlugin] = React.useState(() => (localPlugins?.[0]?.name ?? ''))
       const [syncingPlugin, setSyncingPlugin] = React.useState(false)
@@ -1121,15 +1060,6 @@ window.__ModuleLoader__.load({
           }
         }
         await onConnect(item.alias)
-      }
-
-      const handleOpenBrowserClick = async () => {
-        setBrowserNotice(null)
-        const res = await onOpenBrowser(item.alias)
-        if (res && res.opened) {
-          setBrowserNotice(t('browserOpenedNotice', { url: res.url }))
-          setTimeout(() => setBrowserNotice(null), 4000)
-        }
       }
 
       const handleCopyUrl = async () => {
@@ -1217,11 +1147,6 @@ window.__ModuleLoader__.load({
           }, t('btnEnterAuth')),
           isConnected && h('button', {
             type: 'button',
-            className: 'dsh-rc-btn dsh-rc-btn-primary',
-            onClick: handleOpenBrowserClick,
-          }, t('btnOpenRemoteDsh')),
-          isConnected && h('button', {
-            type: 'button',
             className: 'dsh-rc-btn dsh-rc-btn-danger',
             disabled: isDisconnecting,
             onClick: () => onDisconnect(item.alias),
@@ -1299,7 +1224,6 @@ window.__ModuleLoader__.load({
 
         syncNotice && h('div', { className: 'dsh-rc-notice', role: 'status' }, syncNotice),
         syncError && h('div', { className: 'dsh-rc-error-inline', role: 'alert' }, syncError),
-        browserNotice && h('div', { className: 'dsh-rc-notice' }, browserNotice),
         configDiffersFromActive && h('div', { className: 'dsh-rc-field-hint' },
           t('nextConfigNotice', {
             remotePort: String(item.config.remotePort),
@@ -1469,7 +1393,6 @@ window.__ModuleLoader__.load({
             hosts: [],
           })
           const [manualPrompt, setManualPrompt] = React.useState(null)
-          const [urlModalInfo, setUrlModalInfo] = React.useState(null)
           const [overwriteModalInfo, setOverwriteModalInfo] = React.useState(null)
 
           React.useEffect(() => {
@@ -1480,7 +1403,7 @@ window.__ModuleLoader__.load({
           const localeSnapshot = ctx.locale?.getLocale?.() ?? ctx.locale?.getSnapshot?.()
           const currentLocaleId = typeof localeSnapshot === 'string'
             ? localeSnapshot
-            : (localeSnapshot?.locale ?? localeSnapshot?.id ?? 'zh')
+            : (localeSnapshot?.active ?? localeSnapshot?.locale ?? localeSnapshot?.id ?? t('_lang'))
 
           const fetchHosts = React.useCallback(async (showSpinner = false) => {
             if (showSpinner) setLoading(true)
@@ -1542,24 +1465,6 @@ window.__ModuleLoader__.load({
           const handleSaveConfig = async (host, config) => {
             await callHost('configure', { host, config })
             await fetchHosts(false)
-          }
-
-          const handleOpenBrowser = async (host) => {
-            setActionError(null)
-            try {
-              const res = await callHost('open-browser', { host })
-              if (res && (res.fallbackRequired || !res.opened)) {
-                setUrlModalInfo({
-                  host,
-                  url: res.url,
-                  reason: res.reason,
-                })
-              }
-              return res
-            } catch (err) {
-              setActionError(err instanceof Error ? err.message : String(err))
-              return null
-            }
           }
 
           const handleKillPortAndReconnect = async (host, remotePort) => {
@@ -1671,7 +1576,6 @@ window.__ModuleLoader__.load({
                           localeId: currentLocaleId,
                           onConnect: handleConnect,
                           onDisconnect: handleDisconnect,
-                          onOpenBrowser: handleOpenBrowser,
                           onSaveConfig: handleSaveConfig,
                           onKillPortAndReconnect: handleKillPortAndReconnect,
                           onSyncPlugin: handleSyncPlugin,
@@ -1690,12 +1594,6 @@ window.__ModuleLoader__.load({
               confirmInfo: overwriteModalInfo,
               onConfirm: handleConfirmOverwrite,
               onCancel: () => setOverwriteModalInfo(null),
-              t,
-            }),
-
-            h(UrlFallbackModal, {
-              info: urlModalInfo,
-              onClose: () => setUrlModalInfo(null),
               t,
             }))
         }
