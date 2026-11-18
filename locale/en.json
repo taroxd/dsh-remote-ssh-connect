@@ -1,0 +1,7 @@
+{
+  "meta": {
+    "title": "Remote SSH connect",
+    "description": "Adds the SSH login panel to the left sidebar to manage SSH connections from ~/.ssh/config, automatically install matching Node.js and DSH versions under ~/.dsh-remote-connect on remote Linux hosts, forward local ports to remote DSH instances, handle interactive password/OTP prompts and port conflicts, and open remote DSH in the default browser.",
+    "detail": "docs/DETAIL.md"
+  }
+}
