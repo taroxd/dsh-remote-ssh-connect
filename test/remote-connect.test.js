@@ -1,7 +1,7 @@
 // Unit and integration tests for dsh-remote-connect using strictly synthetic RFC 5737 test fixtures.
 
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -19,11 +19,16 @@ import {
   isConcreteHostPattern,
   listLocalPlugins,
   loadSshConfigHosts,
+  makeLocalWorkspaceId,
+  MinimalWsClient,
   normalizeHostConfig,
+  normalizeSyncedWorkspaceRecord,
   openUrlInDefaultBrowser,
   packLocalPluginDirectory,
+  parseLocalWorkspaceId,
   parseSshConfigText,
   resolveHostsFromBlocks,
+  validateHostAlias,
   validateHostConfigInput,
 } from '../index.js'
 import { AskpassCoordinator, classifyAuthPrompt } from '../src/askpass-server.js'
@@ -849,11 +854,686 @@ Match host 203.0.113.*
     assert.equal(injectedCallbacks.some((c) => c.deps.includes('storageDomain')), true)
     assert.equal(injectedCallbacks.some((c) => c.deps.includes('connection')), true)
     assert.equal(injectedCallbacks.some((c) => c.deps.includes('tools')), true)
+    assert.equal(injectedCallbacks.some((c) => c.deps.includes('typertGateway')), true)
+
+    // Verify Cordis Service proxy unwrapping when target has Symbol.for('cordis.tracker') own symbol
+    // and Proxy exposes the raw service via Symbol.for('cordis.original')
+    const rawGateway = {
+      [Symbol.for('cordis.tracker')]: { associate: 'typertGateway', property: 'ctx' },
+      dispatchRpc: async () => ({ ok: true, value: 'original-rpc' }),
+      openWireStream: async () => 'original-stream',
+    }
+    const proxiedGateway = new Proxy(rawGateway, {
+      get(target, prop, receiver) {
+        if (prop === Symbol.for('cordis.original')) return target
+        return Reflect.get(target, prop, receiver)
+      },
+    })
+    const gwInjectEntry = injectedCallbacks.find((c) => c.deps.includes('typertGateway'))
+    assert.ok(gwInjectEntry)
+    gwInjectEntry.fn({
+      typertGateway: proxiedGateway,
+      get() { return undefined },
+      effect(fn) {
+        const cleanup = fn()
+        if (typeof cleanup === 'function') cleanups.push(cleanup)
+      },
+    })
+    assert.equal(mgr.workspaceBridge.attachedGateway, rawGateway, 'Must unwrap Cordis Service proxy via Symbol.for("cordis.original"), not Symbol.for("cordis.tracker")')
 
     // Wait briefly for async init, then run all effect disposers
     await new Promise((r) => setTimeout(r, 30))
     for (const cleanup of cleanups) {
       await cleanup()
+    }
+  }
+
+  // 12. Remote Workspace synchronization, session federation (connected vs disconnected), remote deletion detection, and plugin diffing
+  {
+    assert.equal(makeLocalWorkspaceId('prod-box', 'ws-123'), 'remote:prod-box:ws-123')
+    assert.deepEqual(parseLocalWorkspaceId('remote:prod-box:ws-123'), {
+      host: 'prod-box',
+      remoteWorkspaceId: 'ws-123',
+    })
+    assert.equal(parseLocalWorkspaceId('local-uuid-1234'), null)
+
+    const normRec = normalizeSyncedWorkspaceRecord({
+      host: 'prod-box',
+      remoteWorkspaceId: 'ws-123',
+      remotePath: '/home/ubuntu/backend',
+      title: 'backend',
+    })
+    assert.equal(normRec.localWorkspaceId, 'remote:prod-box:ws-123')
+    assert.equal(normRec.invalidated, false)
+
+    const tmpRoot = await mkdtemp(join(tmpdir(), 'dsh-rc-wsbridge-test-'))
+    try {
+      const sshConfigPath = join(tmpRoot, 'ssh_config')
+      await writeFile(
+        sshConfigPath,
+        [
+          'Host ws-box',
+          '  HostName 198.51.100.88',
+          '  User ubuntu',
+        ].join('\n'),
+        'utf8',
+      )
+
+      const profileDir = join(tmpRoot, 'profile')
+      const localPluginDir = join(profileDir, 'node_modules', 'local-only-plugin')
+      await mkdir(localPluginDir, { recursive: true })
+      await writeFile(
+        join(localPluginDir, 'package.json'),
+        JSON.stringify({
+          name: 'local-only-plugin',
+          version: '1.0.0',
+          dsh: { bundle: { patch: './cordis.patch.yml' } },
+        }),
+        'utf8',
+      )
+      await writeFile(
+        join(profileDir, 'package.json'),
+        JSON.stringify({
+          name: 'dsh-profile-ws',
+          private: true,
+          dsh: { profile: { bundles: ['local-only-plugin', 'dsh-remote-connect'] } },
+          dependencies: {
+            'local-only-plugin': '1.0.0',
+            'dsh-remote-connect': '1.0.0',
+          },
+        }),
+        'utf8',
+      )
+
+      // Simulated remote workspaces & sessions state
+      let remoteWorkspacesList = [
+        {
+          workspaceId: 'rws-alpha',
+          path: '/home/ubuntu/alpha-service',
+          title: 'alpha-service',
+          sessionIds: ['session-remote-1', 'session-remote-2'],
+          createdAt: '2026-11-18T10:00:00.000Z',
+          updatedAt: '2026-11-18T12:00:00.000Z',
+        },
+        {
+          workspaceId: 'rws-beta',
+          path: '/home/ubuntu/beta-worker',
+          title: 'beta-worker',
+          sessionIds: ['session-remote-unwatched'],
+          createdAt: '2026-11-18T09:00:00.000Z',
+          updatedAt: '2026-11-18T11:00:00.000Z',
+        },
+      ]
+
+      const remoteSessionsMap = new Map([
+        ['session-remote-1', {
+          sessionId: 'session-remote-1',
+          title: 'Fix memory leak',
+          cwd: '/home/ubuntu/alpha-service',
+          running: false,
+          blank: false,
+          updatedAt: 1700000002000,
+        }],
+        ['session-remote-2', {
+          sessionId: 'session-remote-2',
+          title: 'Add metrics endpoint',
+          cwd: '/home/ubuntu/alpha-service',
+          running: true,
+          blank: false,
+          updatedAt: 1700000005000,
+        }],
+        ['session-remote-unwatched', {
+          sessionId: 'session-remote-unwatched',
+          title: 'Unwatched beta session',
+          cwd: '/home/ubuntu/beta-worker',
+          running: false,
+          blank: false,
+          updatedAt: 1700000009000,
+        }],
+      ])
+
+      const remotePromptsReceived = []
+
+      // Mock WebSocket factory for RemoteHostGatewayClient so we test the full stream + RPC federation deterministically
+      class MockWs extends EventEmitter {
+        constructor() {
+          super()
+          this.readyState = 0
+          setTimeout(() => {
+            this.readyState = 1
+            this.emit('open')
+          }, 5)
+        }
+
+        send(raw) {
+          const msg = JSON.parse(raw)
+          if (msg.type === 'open') {
+            if (msg.endpoint === 'workspace/follow') {
+              setTimeout(() => {
+                this.emit('message', {
+                  data: JSON.stringify({
+                    type: 'item',
+                    streamId: msg.streamId,
+                    value: {
+                      type: 'baseline',
+                      value: {
+                        items: remoteWorkspacesList,
+                        archivedSessionIds: [],
+                        pinnedSessionIds: ['session-remote-2'],
+                      },
+                    },
+                  }),
+                })
+              }, 5)
+            } else if (msg.endpoint === 'session/control') {
+              setTimeout(() => {
+                this.emit('message', {
+                  data: JSON.stringify({
+                    type: 'item',
+                    streamId: msg.streamId,
+                    value: {
+                      type: 'baseline',
+                      value: {
+                        projections: {
+                          'session-remote-1': { asOfSeq: 4, values: { title: 'Fix memory leak' } },
+                        },
+                      },
+                    },
+                  }),
+                })
+              }, 5)
+            } else if (msg.endpoint === '$events') {
+              setTimeout(() => {
+                this.emit('message', {
+                  data: JSON.stringify({
+                    type: 'item',
+                    streamId: msg.streamId,
+                    value: {
+                      type: 'ready',
+                      clientId: 'remote-client-1',
+                      host: { home: '/home/ubuntu' },
+                    },
+                  }),
+                })
+              }, 5)
+            } else if (msg.endpoint === 'session/follow') {
+              const sid = msg.payload?.args?.address?.sessionId || msg.payload?.args?.sessionId
+              setTimeout(() => {
+                this.emit('message', {
+                  data: JSON.stringify({
+                    type: 'item',
+                    streamId: msg.streamId,
+                    value: {
+                      type: 'snapshot',
+                      sessionId: sid,
+                      events: [{ seq: 0, type: 'user/message', text: 'Hello remote session' }],
+                    },
+                  }),
+                })
+                this.emit('message', {
+                  data: JSON.stringify({
+                    type: 'end',
+                    streamId: msg.streamId,
+                  }),
+                })
+              }, 5)
+            }
+          }
+        }
+
+        close() {
+          this.readyState = 3
+          this.emit('close', 1000, '')
+        }
+      }
+
+      const mockFetch = async (urlStr, init = {}) => {
+        const u = new URL(urlStr)
+        if (init.method === 'GET' && u.pathname === '/') {
+          return new Response(null, {
+            status: 303,
+            headers: { 'set-cookie': 'dsh-auth-ws=v1.mock.sig; Path=/; HttpOnly' },
+          })
+        }
+        if (init.method === 'POST' && u.pathname.startsWith('/api/')) {
+          const body = JSON.parse(init.body)
+          const endpoint = body.method
+          const args = body.payload?.args ?? {}
+
+          let value = null
+          if (endpoint === 'session/list') {
+            value = { items: [...remoteSessionsMap.values()] }
+          } else if (endpoint === 'session/create') {
+            const req = args.request ?? args
+            const newId = 'session-remote-created-3'
+            const newSummary = {
+              sessionId: newId,
+              title: 'New remote session',
+              cwd: '/home/ubuntu/alpha-service',
+              running: false,
+              blank: true,
+              updatedAt: Date.now(),
+            }
+            remoteSessionsMap.set(newId, newSummary)
+            const ws = remoteWorkspacesList.find((w) => w.workspaceId === req.workspaceId)
+            if (ws) ws.sessionIds = [newId, ...ws.sessionIds]
+            value = { sessionId: newId }
+          } else if (endpoint === 'session/prompt') {
+            const req = args.request ?? args
+            remotePromptsReceived.push(req)
+            value = { accepted: true }
+          } else if (endpoint === 'customLocalOnly/someAction') {
+            return Response.json({
+              type: 'server-response',
+              rpcId: body.rpcId,
+              result: {
+                ok: false,
+                error: {
+                  code: 'gateway/invocation-unavailable',
+                  message: 'no active Remote method exports this endpoint',
+                  details: {},
+                },
+              },
+            })
+          } else if (endpoint === 'customLocalOnly/list') {
+            return Response.json({
+              type: 'server-response',
+              rpcId: body.rpcId,
+              result: {
+                ok: false,
+                error: {
+                  code: 'gateway/invocation-unavailable',
+                  message: 'no active Remote method exports this endpoint',
+                  details: {},
+                },
+              },
+            })
+          }
+
+          return Response.json({
+            type: 'server-response',
+            rpcId: body.rpcId,
+            result: { ok: true, value },
+          })
+        }
+        return new Response('not found', { status: 404 })
+      }
+
+      const mockSpawn = () => {
+        const child = new EventEmitter()
+        child.stdin = new PassThrough()
+        child.stdout = new PassThrough()
+        child.stderr = new PassThrough()
+        child.exitCode = null
+        child.killed = false
+        child.kill = () => {
+          child.killed = true
+          child.exitCode = 0
+          child.emit('close', 0)
+        }
+
+        setTimeout(() => {
+          child.stdout.write(`${EVENT_PREFIX}{"type":"ready","url":"http://127.0.0.1:43210/?token=wstok","remotePort":3080,"localPort":43210,"profile":"web","pid":2222}\n`)
+        }, 10)
+
+        let lineBuf = ''
+        child.stdin.on('data', (chunk) => {
+          lineBuf += String(chunk)
+          const lines = lineBuf.split('\n')
+          lineBuf = lines.pop() ?? ''
+          for (const rawLine of lines) {
+            const cmd = rawLine.trim()
+            if (cmd === 'SHUTDOWN') {
+              child.exitCode = 0
+              child.emit('close', 0)
+              return
+            }
+            if (cmd.startsWith('RPC:')) {
+              const req = JSON.parse(cmd.slice('RPC:'.length))
+              if (req.method === 'list_plugins') {
+                child.stdout.write(`${EVENT_PREFIX}${JSON.stringify({
+                  type: 'rpc_result',
+                  id: req.id,
+                  ok: true,
+                  value: {
+                    plugins: [
+                      {
+                        name: 'remote-only-plugin',
+                        version: '2.1.0',
+                        title: { zh: '远端专属插件', en: 'Remote Only Plugin' },
+                        enabled: true,
+                        hasClientUi: true,
+                        sourceKind: 'npm',
+                      },
+                    ],
+                  },
+                })}\n`)
+              }
+            }
+          }
+        })
+
+        return child
+      }
+
+      const savedWorkspacesInStorage = new Map()
+      const manager = new RemoteConnectionManager({
+        sshConfigPath,
+        localProfileDir: profileDir,
+        dshVersion: '0.2.2-rc.3',
+        spawnProcess: mockSpawn,
+        fetchImpl: mockFetch,
+        createWs: () => new MockWs(),
+        onSaveWorkspace: async (id, rec) => {
+          if (rec === null) savedWorkspacesInStorage.delete(id)
+          else savedWorkspacesInStorage.set(id, rec)
+        },
+      })
+
+      await manager.init()
+      try {
+        // Connect to ws-box
+        await manager.connectHost('ws-box', { waitForReady: true })
+
+        // 1. List remote workspaces & verify plugin diffing (local-only-plugin vs remote-only-plugin, dsh-remote-connect excluded)
+        const remoteWsRes = await manager.listRemoteWorkspaces('ws-box')
+        assert.equal(remoteWsRes.workspaces.length, 2)
+        assert.equal(remoteWsRes.workspaces[0].remoteWorkspaceId, 'rws-alpha')
+        assert.equal(remoteWsRes.workspaces[0].synced, false)
+        assert.deepEqual(
+          remoteWsRes.pluginDiff.missingOnRemote.map((p) => p.name),
+          ['local-only-plugin'],
+        )
+        assert.deepEqual(
+          remoteWsRes.pluginDiff.missingOnLocal.map((p) => p.name),
+          ['remote-only-plugin'],
+        )
+
+        // 2. Sync remote workspace `rws-alpha` to local
+        const syncRes = await manager.syncRemoteWorkspace('ws-box', { remoteWorkspaceId: 'rws-alpha' })
+        assert.equal(syncRes.synced, true)
+        assert.equal(syncRes.workspace.localWorkspaceId, 'remote:ws-box:rws-alpha')
+        assert.equal(savedWorkspacesInStorage.has('remote:ws-box:rws-alpha'), true)
+
+        // Connected state: projected WorkspaceView must expose the remote workspace's sessionIds
+        assert.deepEqual(syncRes.view.sessionIds, ['session-remote-1', 'session-remote-2'])
+
+        // Verify session/list RPC interception merges only sessions belonging to the synced workspace (not unwatched rws-beta)
+        const listRpcRes = await manager.workspaceBridge.interceptRpc(
+          'session/list',
+          { args: {} },
+          undefined,
+          {},
+          async () => ({
+            ok: true,
+            value: {
+              items: [{ sessionId: 'local-session-1', title: 'Local task', updatedAt: 1700000001000 }],
+            },
+          }),
+        )
+        assert.equal(listRpcRes.ok, true)
+        assert.deepEqual(
+          listRpcRes.value.items.map((i) => i.sessionId),
+          ['session-remote-2', 'session-remote-1', 'local-session-1'],
+          'Only sessions from synced remote workspaces + local sessions should appear in session/list',
+        )
+
+        // Verify creating a new session in the synced remote workspace executes on the remote host
+        const createRpcRes = await manager.workspaceBridge.interceptRpc(
+          'session/create',
+          { args: { request: { workspaceId: 'remote:ws-box:rws-alpha' } } },
+          undefined,
+          {},
+          async () => { throw new Error('Should not call local session/create for remote workspace') },
+        )
+        assert.equal(createRpcRes.ok, true)
+        assert.equal(createRpcRes.value.sessionId, 'session-remote-created-3')
+
+        // Verify prompting the remote session forwards to the remote host
+        const promptRpcRes = await manager.workspaceBridge.interceptRpc(
+          'session/prompt',
+          {
+            args: {
+              request: {
+                sessionId: 'session-remote-created-3',
+                content: [{ type: 'text', text: 'Run remote build' }],
+                mode: 'queue',
+              },
+            },
+          },
+          undefined,
+          {},
+          async () => { throw new Error('Should not call local session/prompt for remote session') },
+        )
+        assert.equal(promptRpcRes.ok, true)
+        assert.equal(remotePromptsReceived.length, 1)
+        assert.equal(remotePromptsReceived[0].sessionId, 'session-remote-created-3')
+
+        // Verify streaming session/follow for a remote session bridges from the remote WebSocket
+        const streamIterable = await manager.workspaceBridge.interceptStream(
+          'session/follow',
+          { args: { address: { kind: 'session', sessionId: 'session-remote-1' } } },
+          undefined,
+          {},
+          undefined,
+          new AbortController(),
+          undefined,
+          async () => { throw new Error('Should not open local session/follow for remote session') },
+        )
+        const streamFrames = []
+        for await (const frame of streamIterable) {
+          streamFrames.push(frame)
+        }
+        assert.equal(streamFrames.length, 1)
+        assert.equal(streamFrames[0].type, 'snapshot')
+        assert.equal(streamFrames[0].sessionId, 'session-remote-1')
+
+        // Verify graceful fallback when a local-only plugin calls a non-existent remote `/list` endpoint
+        const fallbackListRes = await manager.workspaceBridge.interceptRpc(
+          'customLocalOnly/list',
+          { args: { sessionId: 'session-remote-1' } },
+          undefined,
+          {},
+          async () => ({ ok: false }),
+        )
+        assert.deepEqual(fallbackListRes, { ok: true, value: [] })
+
+        // 3. Disconnect host -> remote workspace stays in Workspaces list, but its sessionIds become [] (sessions hidden)
+        await manager.disconnectHost('ws-box')
+        const viewsWhileDisconnected = manager.workspaceBridge.getProjectedWorkspaceViews()
+        assert.equal(viewsWhileDisconnected.length, 1)
+        assert.equal(viewsWhileDisconnected[0].workspaceId, 'remote:ws-box:rws-alpha')
+        assert.deepEqual(
+          viewsWhileDisconnected[0].sessionIds,
+          [],
+          'When remote host is disconnected, sessions under the remote workspace must not be viewable',
+        )
+
+        // 4. Simulate remote workspace `rws-alpha` being deleted on the remote host, then reconnect
+        remoteWorkspacesList = [
+          {
+            workspaceId: 'rws-beta',
+            path: '/home/ubuntu/beta-worker',
+            title: 'beta-worker',
+            sessionIds: [],
+            createdAt: '2026-11-18T09:00:00.000Z',
+            updatedAt: '2026-11-18T11:00:00.000Z',
+          },
+        ]
+        await manager.connectHost('ws-box', { waitForReady: true })
+        await new Promise((r) => setTimeout(r, 30))
+
+        const hostListAfterDelete = await manager.listHosts()
+        assert.equal(
+          hostListAfterDelete.invalidatedWorkspaces.length,
+          1,
+          'Deleted remote workspace must be flagged in invalidatedWorkspaces to notify the user',
+        )
+        assert.equal(hostListAfterDelete.invalidatedWorkspaces[0].localWorkspaceId, 'remote:ws-box:rws-alpha')
+        assert.equal(hostListAfterDelete.invalidatedWorkspaces[0].invalidationReason, 'deleted_on_remote')
+
+        // User confirms removal of invalidated remote workspace
+        const rmRes = await manager.removeSyncedWorkspace('remote:ws-box:rws-alpha')
+        assert.equal(rmRes.removed, true)
+        assert.equal(savedWorkspacesInStorage.has('remote:ws-box:rws-alpha'), false)
+        assert.equal(manager.workspaceBridge.getProjectedWorkspaceViews().length, 0)
+
+        await manager.disconnectHost('ws-box')
+      } finally {
+        await manager.dispose()
+      }
+    } finally {
+      await rm(tmpRoot, { recursive: true, force: true })
+    }
+  }
+
+  // 13. MinimalWsClient real loopback RFC 6455 handshake & frame exchange test
+  {
+    const { createServer: createHttpServer } = await import('node:http')
+    const { createHash } = await import('node:crypto')
+
+    const receivedServerMessages = []
+    let receivedCookieHeader = null
+
+    const wsSockets = new Set()
+    const wsServer = createHttpServer()
+    wsServer.on('upgrade', (req, socket) => {
+      wsSockets.add(socket)
+      socket.on('close', () => wsSockets.delete(socket))
+      receivedCookieHeader = req.headers.cookie
+      const key = req.headers['sec-websocket-key']
+      const accept = createHash('sha1')
+        .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest('base64')
+      socket.write([
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Accept: ${accept}`,
+        '',
+        '',
+      ].join('\r\n'))
+
+      // Send an unmasked server-to-client text frame right after handshake
+      const greeting = Buffer.from(JSON.stringify({ hello: 'from-server' }), 'utf8')
+      const outFrame = Buffer.allocUnsafe(2 + greeting.length)
+      outFrame[0] = 0x81
+      outFrame[1] = greeting.length
+      greeting.copy(outFrame, 2)
+      socket.write(outFrame)
+
+      socket.on('data', (buf) => {
+        if (buf.length < 6) return
+        const opcode = buf[0] & 0x0f
+        if (opcode === 0x01) {
+          const len = buf[1] & 0x7f
+          const mask = buf.subarray(2, 6)
+          const payload = Buffer.allocUnsafe(len)
+          for (let i = 0; i < len; i += 1) {
+            payload[i] = buf[6 + i] ^ mask[i & 3]
+          }
+          receivedServerMessages.push(payload.toString('utf8'))
+        }
+      })
+    })
+
+    await new Promise((resolve) => wsServer.listen(0, '127.0.0.1', resolve))
+    const port = wsServer.address().port
+    try {
+      const clientMessages = []
+      const wsClient = new MinimalWsClient(`ws://127.0.0.1:${port}/api/remote.mux`, {
+        headers: { Cookie: 'dsh-auth-test=123' },
+      })
+
+      await new Promise((resolve, reject) => {
+        wsClient.once('open', resolve)
+        wsClient.once('error', reject)
+      })
+      wsClient.on('message', (ev) => clientMessages.push(ev.data))
+      wsClient.send(JSON.stringify({ type: 'open', streamId: 's1' }))
+
+      await new Promise((r) => setTimeout(r, 40))
+      assert.equal(receivedCookieHeader, 'dsh-auth-test=123')
+      assert.equal(clientMessages.length, 1)
+      assert.deepEqual(JSON.parse(clientMessages[0]), { hello: 'from-server' })
+      assert.equal(receivedServerMessages.length, 1)
+      assert.deepEqual(JSON.parse(receivedServerMessages[0]), { type: 'open', streamId: 's1' })
+      wsClient.close()
+    } finally {
+      for (const s of wsSockets) s.destroy()
+      await new Promise((resolve) => wsServer.close(resolve))
+    }
+  }
+
+  // 14. Client bundle (`client.js`) registration and slot mounting verification
+  {
+    const clientCode = await readFile(join(process.cwd(), 'client.js'), 'utf8')
+    let registeredModule = null
+    const prevWindow = globalThis.window
+    globalThis.window = {
+      __ModuleLoader__: {
+        load(def) {
+          registeredModule = def
+        },
+      },
+    }
+    try {
+      const fn = new Function(clientCode)
+      fn()
+      assert.ok(registeredModule, 'client.js must register with window.__ModuleLoader__.load')
+      assert.equal(registeredModule.id, 'dsh-remote-connect')
+      assert.equal(typeof registeredModule.factory, 'function')
+
+      const mockReact = {
+        Fragment: Symbol('Fragment'),
+        createElement: (type, props, ...children) => ({ type, props, children }),
+        useState: (init) => [typeof init === 'function' ? init() : init, () => {}],
+        useEffect: () => {},
+        useCallback: (cb) => cb,
+        useRef: (init) => ({ current: init }),
+      }
+      const pluginExport = registeredModule.factory((spec) => {
+        if (spec === 'react') return mockReact
+        if (spec === 'react-dom') return { createPortal: (el) => el }
+        throw new Error(`Unexpected require: ${spec}`)
+      })
+      assert.ok(pluginExport)
+      assert.equal(typeof pluginExport.apply, 'function')
+
+      const registeredSlots = []
+      let registeredDicts = null
+      const mockClientCtx = {
+        effect: (cb) => cb(),
+        locale: {
+          register: (_ns, dicts) => {
+            registeredDicts = dicts
+            return () => {}
+          },
+          bind: () => (k) => k,
+        },
+        slots: {
+          inject: (_slot, cb) => cb(),
+          register: (spec, comp) => {
+            registeredSlots.push({ spec, comp })
+            return () => {}
+          },
+        },
+        get: () => undefined,
+      }
+      pluginExport.apply(mockClientCtx)
+      assert.deepEqual(
+        registeredSlots.map((s) => s.spec.name),
+        ['shell.overlay', 'conversation.session.header.actions', 'main', 'sidebar.panellist'],
+      )
+      assert.equal(registeredDicts?.en?.syncWorkspaceLabel, 'Remote workspace')
+      assert.equal(registeredDicts?.zh?.syncWorkspaceLabel, '远程工作区')
+      assert.equal(validateHostAlias('prod-gpu'), 'prod-gpu')
+      assert.throws(() => validateHostAlias('-oProxyCommand=evil'), /cannot start with "-"/)
+      assert.throws(() => validateHostAlias('bad:host'), /forbidden characters/)
+      assert.throws(() => validateHostAlias('bad host'), /forbidden characters/)
+    } finally {
+      if (prevWindow === undefined) delete globalThis.window
+      else globalThis.window = prevWindow
     }
   }
 

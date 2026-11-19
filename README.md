@@ -14,6 +14,13 @@ Bilingual (`zh` / `en`) DeepSeek Harness (DSH) bundle plugin that adds the **SSH
 - **Local-to-remote plugin synchronization**:
   - Syncs any user-installed local plugin to a connected remote host using the same installation method (`npm` source, `GitHub` source, or `local` directory/tarball source).
   - When the plugin is already installed on the remote host at a version `<=` the local version, automatically removes and reinstalls it; when the remote version is higher than the local version, prompts for confirmation before removing and reinstalling.
+- **Remote Workspace & Session Federation**:
+  - Lists workspaces from a connected remote DSH instance in the **Remote workspace** (**远程工作区**) control of the SSH card and synchronizes selected workspaces locally via **Sync to local** (**同步到本地**).
+  - Displays synchronized remote workspaces in a dedicated **Remote Workspaces** (**远程工作区**) section in the left sidebar right above **Workspaces**, using native DSH folder icons.
+  - When the remote host is disconnected, hides sessions under its remote workspaces and replaces the right-side **New Session** button with an icon-only **Connect host** (**连接主机**) button (with hover tooltip) to connect directly from the sidebar.
+  - When connected, synchronizes all sessions inside that remote workspace and proxies session creation, renaming, pinning, archiving, forking, model prompting, history streaming, file browsing, and terminal sessions to the remote DSH.
+  - Detects when a synced remote workspace has been deleted on the remote host and prompts the user to confirm removal from local persistence.
+  - Handles local/remote plugin differences via remote execution authority, built-in generic tool card fallback, non-blocking plugin diff hints with persistent per-fingerprint dismissal and one-click sync, and a quick link to open the remote native DSH UI.
 - **Custom profile initialization & port forwarding**:
   - Maps a local port (auto-allocated when `0`, or fixed `1-65535`) to the configured remote port (default `3080`, effective from the next connection).
   - Launches remote DSH with the configured profile (default `web`), automatically passing `--from-default-profile web` when initializing a non-existent custom profile on the remote host.

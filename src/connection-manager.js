@@ -17,6 +17,12 @@ import {
   packLocalPluginDirectory,
 } from './plugin-sync.js'
 import { buildKillRemotePortScript, buildRemoteBootstrapScript, EVENT_PREFIX } from './remote-script.js'
+import {
+  RemoteWorkspaceBridge,
+  makeLocalWorkspaceId,
+  normalizeSyncedWorkspaceRecord,
+  parseLocalWorkspaceId,
+} from './remote-workspace-bridge.js'
 import { loadSshConfigHosts } from './ssh-config.js'
 
 export const DEFAULT_REMOTE_PORT = 3080
@@ -101,6 +107,20 @@ export function normalizeHostConfig(raw = {}) {
   }
 }
 
+export function validateHostAlias(host) {
+  const trimmed = typeof host === 'string' ? host.trim() : ''
+  if (!trimmed) {
+    throw new Error('Host alias is required.')
+  }
+  if (trimmed.startsWith('-')) {
+    throw new Error(`Invalid host alias "${trimmed}": cannot start with "-".`)
+  }
+  if (/[\x00-\x1f\x7f\s:]/.test(trimmed)) {
+    throw new Error(`Invalid host alias "${trimmed}": contains forbidden characters.`)
+  }
+  return trimmed
+}
+
 export function validateHostConfigInput(input = {}) {
   const next = {}
   if (input.remotePort !== undefined) {
@@ -156,6 +176,7 @@ export class RemoteConnectionManager {
     this.forceInstallNode = options.forceInstallNode === true
     this.customDshTarballUrl = options.customDshTarballUrl
     this.onSaveConfig = options.onSaveConfig ?? (async () => {})
+    this.onSaveWorkspace = options.onSaveWorkspace ?? (async () => {})
     this.openBrowser = options.openBrowser ?? openUrlInDefaultBrowser
     this.spawnProcess = options.spawnProcess ?? spawn
 
@@ -164,6 +185,12 @@ export class RemoteConnectionManager {
 
     /** @type {Map<string, object>} */
     this.sessions = new Map()
+
+    this.workspaceBridge = new RemoteWorkspaceBridge({
+      onSaveWorkspace: (localWsId, record) => this.onSaveWorkspace(localWsId, record),
+      fetchImpl: options.fetchImpl,
+      createWs: options.createWs,
+    })
 
     this.askpass = new AskpassCoordinator({
       onPromptChanged: (host, promptInfo) => {
@@ -196,10 +223,7 @@ export class RemoteConnectionManager {
   }
 
   async configureHost(host, patch) {
-    if (typeof host !== 'string' || !host.trim()) {
-      throw new Error('Host alias is required.')
-    }
-    const hostKey = host.trim()
+    const hostKey = validateHostAlias(host)
     const validated = validateHostConfigInput(patch)
     const current = this.getHostConfig(hostKey)
     const updated = normalizeHostConfig({ ...current, ...validated })
@@ -211,6 +235,8 @@ export class RemoteConnectionManager {
   _serializeSession(host, sshMeta, config) {
     const sess = this.sessions.get(host)
     const authPrompt = this.askpass.getPendingPromptForHost(host) ?? sess?.authPrompt ?? null
+    const allSynced = this.workspaceBridge.listSyncedWorkspaces((h) => this.sessions.get(h)?.status ?? 'disconnected')
+    const syncedWorkspaces = allSynced.filter((w) => w.host === host)
     return {
       alias: host,
       hostName: sshMeta?.hostName ?? host,
@@ -232,6 +258,7 @@ export class RemoteConnectionManager {
       authPrompt,
       error: sess?.error ?? null,
       recentLogs: sess?.recentLogs ? [...sess.recentLogs] : [],
+      syncedWorkspaces,
     }
   }
 
@@ -268,11 +295,18 @@ export class RemoteConnectionManager {
       }
     }
 
+    const syncedWorkspaces = this.workspaceBridge.listSyncedWorkspaces(
+      (h) => this.sessions.get(h)?.status ?? 'disconnected',
+    )
+    const invalidatedWorkspaces = syncedWorkspaces.filter((w) => w.invalidated)
+
     return {
       configPath: parsed.configPath,
       configExists: parsed.exists,
       dshVersion: this.dshVersion,
       localPlugins,
+      syncedWorkspaces,
+      invalidatedWorkspaces,
       hosts: items,
     }
   }
@@ -295,10 +329,7 @@ export class RemoteConnectionManager {
    * @param {number} [options.overrideRemotePort] - Optional one-time/saved remotePort override.
    */
   async connectHost(host, options = {}) {
-    if (typeof host !== 'string' || !host.trim()) {
-      throw new Error('Host alias is required.')
-    }
-    const hostKey = host.trim()
+    const hostKey = validateHostAlias(host)
     await this.askpass.start()
 
     if (options.overrideRemotePort !== undefined) {
@@ -394,7 +425,8 @@ export class RemoteConnectionManager {
 
     const appendLog = (line) => {
       if (!line) return
-      session.recentLogs.push(line)
+      const sanitized = String(line).replace(/([?&]token=)[^&\s#]+/gi, '$1[REDACTED]')
+      session.recentLogs.push(sanitized)
       if (session.recentLogs.length > 30) {
         session.recentLogs.shift()
       }
@@ -498,7 +530,11 @@ export class RemoteConnectionManager {
           }
         }, 25_000)
         session.keepaliveTimer.unref?.()
-        resolveReady(session)
+        Promise.resolve(this.workspaceBridge.onHostConnected(hostKey, session.url))
+          .catch(() => {})
+          .finally(() => {
+            resolveReady(session)
+          })
         return
       }
       if (ev.type === 'error') {
@@ -520,6 +556,7 @@ export class RemoteConnectionManager {
           if (ev.ok) {
             pending.resolve(ev.value)
           } else {
+            appendLog(`RPC error (${ev.id}): ${ev.error || 'Remote operation failed'}`)
             pending.reject(new Error(ev.error || 'Remote operation failed'))
           }
         }
@@ -570,6 +607,7 @@ export class RemoteConnectionManager {
         session.keepaliveTimer = null
       }
       askpassSession.dispose()
+      this.workspaceBridge.onHostDisconnected(hostKey)
       rejectAllPendingRpcs(err instanceof Error ? err.message : String(err))
       if (!session.userDisconnecting) {
         session.status = 'error'
@@ -588,6 +626,7 @@ export class RemoteConnectionManager {
         session.keepaliveTimer = null
       }
       askpassSession.dispose()
+      this.workspaceBridge.onHostDisconnected(hostKey)
       rejectAllPendingRpcs(`SSH connection closed (code ${String(code)})`)
       if (session.userDisconnecting) {
         session.status = 'disconnected'
@@ -684,6 +723,7 @@ export class RemoteConnectionManager {
       })
     }
 
+    this.workspaceBridge.onHostDisconnected(hostKey)
     this.sessions.delete(hostKey)
     return this.getHostStatus(hostKey)
   }
@@ -730,7 +770,7 @@ export class RemoteConnectionManager {
    * @param {boolean} [options.waitForReady=false]
    */
   async killRemotePortOccupant(host, options = {}) {
-    const hostKey = String(host || '').trim()
+    const hostKey = validateHostAlias(host)
     const cfg = this.getHostConfig(hostKey)
     const sess = this.sessions.get(hostKey)
     const targetPort = Number(options.remotePort ?? sess?.error?.remotePort ?? cfg.remotePort)
@@ -943,11 +983,10 @@ export class RemoteConnectionManager {
    * @param {boolean} [options.force=false]
    */
   async syncPluginToHost(host, options = {}) {
-    const hostKey = String(host || '').trim()
+    const hostKey = validateHostAlias(host)
     const pluginName = String(options.pluginName || '').trim()
     const force = options.force === true
 
-    if (!hostKey) throw new Error('Host alias is required.')
     if (!pluginName) throw new Error('Plugin name is required.')
 
     const sess = this.sessions.get(hostKey)
@@ -1050,6 +1089,168 @@ export class RemoteConnectionManager {
   }
 
   /**
+   * Compare user-installed plugins between the local profile and a connected remote host.
+   * Excludes `dsh-remote-connect` itself (which is a local management plugin).
+   * @param {string} host
+   */
+  async compareHostPlugins(host) {
+    const hostKey = String(host || '').trim()
+    const sess = this.sessions.get(hostKey)
+    if (!sess || sess.status !== 'connected') {
+      return {
+        missingOnRemote: [],
+        missingOnLocal: [],
+        versionMismatches: [],
+      }
+    }
+
+    const [localPlugins, remoteRes] = await Promise.all([
+      this.listLocalPlugins().catch(() => []),
+      this._sendSessionRpc(sess, 'list_plugins', {}, null, 15_000).catch(() => ({ plugins: [] })),
+    ])
+
+    const remotePlugins = Array.isArray(remoteRes?.plugins) ? remoteRes.plugins : []
+    const localByName = new Map()
+    for (const lp of localPlugins) {
+      if (lp.name === 'dsh-remote-connect') continue
+      localByName.set(lp.name, lp)
+    }
+    const remoteByName = new Map()
+    for (const rp of remotePlugins) {
+      if (rp.name === 'dsh-remote-connect') continue
+      remoteByName.set(rp.name, rp)
+    }
+
+    const missingOnRemote = []
+    const missingOnLocal = []
+    const versionMismatches = []
+
+    for (const [name, lp] of localByName.entries()) {
+      const rp = remoteByName.get(name)
+      if (!rp) {
+        missingOnRemote.push({
+          name: lp.name,
+          version: lp.version,
+          title: lp.title,
+          sourceKind: lp.sourceKind,
+        })
+      } else if (rp.version && lp.version && comparePluginVersions(lp.version, rp.version) !== 0) {
+        versionMismatches.push({
+          name: lp.name,
+          localVersion: lp.version,
+          remoteVersion: rp.version,
+          title: lp.title,
+          sourceKind: lp.sourceKind,
+        })
+      }
+    }
+
+    for (const [name, rp] of remoteByName.entries()) {
+      if (!localByName.has(name)) {
+        missingOnLocal.push({
+          name: rp.name,
+          version: rp.version,
+          title: rp.title,
+          hasClientUi: Boolean(rp.hasClientUi),
+          sourceKind: rp.sourceKind || 'npm',
+        })
+      }
+    }
+
+    return {
+      missingOnRemote,
+      missingOnLocal,
+      versionMismatches,
+    }
+  }
+
+  /**
+   * List remote workspaces on a connected host along with synced status and plugin difference summary.
+   * @param {string} host
+   */
+  async listRemoteWorkspaces(host) {
+    const hostKey = String(host || '').trim()
+    const sess = this.sessions.get(hostKey)
+    if (!sess || sess.status !== 'connected') {
+      throw new Error(`Host "${hostKey}" must be connected before listing remote workspaces.`)
+    }
+    if (!this.workspaceBridge.isHostConnected(hostKey) && sess.url) {
+      await this.workspaceBridge.onHostConnected(hostKey, sess.url)
+    }
+    const [workspaces, pluginDiff] = await Promise.all([
+      this.workspaceBridge.listRemoteWorkspaces(hostKey),
+      this.compareHostPlugins(hostKey).catch(() => ({
+        missingOnRemote: [],
+        missingOnLocal: [],
+        versionMismatches: [],
+      })),
+    ])
+    const syncedWorkspaces = this.workspaceBridge
+      .listSyncedWorkspaces((h) => this.sessions.get(h)?.status ?? 'disconnected')
+      .filter((w) => w.host === hostKey)
+
+    return {
+      host: hostKey,
+      workspaces,
+      syncedWorkspaces,
+      pluginDiff,
+    }
+  }
+
+  /**
+   * Synchronize a remote workspace to the local DSH so its sessions can be viewed, created,
+   * edited, and prompted directly from the local DSH sidebar.
+   * @param {string} host
+   * @param {object} options
+   * @param {string} [options.remoteWorkspaceId]
+   * @param {string} [options.path]
+   * @param {string} [options.title]
+   */
+  async syncRemoteWorkspace(host, options = {}) {
+    const hostKey = String(host || '').trim()
+    const sess = this.sessions.get(hostKey)
+    if (!sess || sess.status !== 'connected') {
+      throw new Error(`Host "${hostKey}" must be connected before syncing a remote workspace.`)
+    }
+    if (!this.workspaceBridge.isHostConnected(hostKey) && sess.url) {
+      await this.workspaceBridge.onHostConnected(hostKey, sess.url)
+    }
+    const [syncRes, pluginDiff] = await Promise.all([
+      this.workspaceBridge.syncRemoteWorkspace(hostKey, options),
+      this.compareHostPlugins(hostKey).catch(() => ({
+        missingOnRemote: [],
+        missingOnLocal: [],
+        versionMismatches: [],
+      })),
+    ])
+    return {
+      ...syncRes,
+      pluginDiff,
+    }
+  }
+
+  /**
+   * Remove / unsync a remote workspace (or acknowledge & remove an invalidated remote workspace).
+   * @param {string} localWorkspaceId
+   */
+  async removeSyncedWorkspace(localWorkspaceId) {
+    return this.workspaceBridge.removeSyncedWorkspace(localWorkspaceId)
+  }
+
+  /**
+   * List all locally persisted remote workspaces and their current connection/invalidation status.
+   */
+  listSyncedWorkspaces() {
+    const items = this.workspaceBridge.listSyncedWorkspaces(
+      (h) => this.sessions.get(h)?.status ?? 'disconnected',
+    )
+    return {
+      syncedWorkspaces: items,
+      invalidatedWorkspaces: items.filter((w) => w.invalidated),
+    }
+  }
+
+  /**
    * Synchronous best-effort teardown when the local DSH process exits.
    */
   killAllSync() {
@@ -1076,8 +1277,16 @@ export class RemoteConnectionManager {
 
   async dispose() {
     process.off('exit', this._exitHandler)
+    this.workspaceBridge.dispose()
     const hosts = [...this.sessions.keys()]
     await Promise.allSettled(hosts.map((h) => this.disconnectHost(h)))
     await this.askpass.stop()
   }
 }
+
+export {
+  RemoteWorkspaceBridge,
+  makeLocalWorkspaceId,
+  normalizeSyncedWorkspaceRecord,
+  parseLocalWorkspaceId,
+} from './remote-workspace-bridge.js'

@@ -335,6 +335,20 @@ export async function packLocalPluginDirectory(rootDir) {
   }
 
   await walk(rootDir)
+  if (!files.some((f) => f.path === '.npmrc')) {
+    const defaultNpmrc = [
+      'auto-install-peers=false',
+      'registry=https://registry.npmmirror.com/',
+      'fetch-timeout=15000',
+      'fetch-retries=1',
+      '',
+    ].join('\n')
+    files.push({
+      path: '.npmrc',
+      mode: 0o644,
+      data: Buffer.from(defaultNpmrc, 'utf8').toString('base64'),
+    })
+  }
   const payload = JSON.stringify({ version: 1, files })
   return gzipSync(Buffer.from(payload, 'utf8'))
 }
@@ -540,19 +554,21 @@ if (sourceKind === 'local') {
   fs.mkdirSync(localPluginsRoot, { recursive: true });
 
   if (localSubkind === 'tarball') {
-    const baseName = path.basename(tarballFilename);
+    const baseName = path.basename(tarballFilename).replace(/[^A-Za-z0-9._-]/g, '_');
     const destTarball = path.join(localPluginsRoot, baseName.startsWith(safeSlug) ? baseName : (safeSlug + '-' + baseName));
     fs.writeFileSync(destTarball, stdinBuf);
     targetSpec = 'file:' + destTarball;
   } else {
     const destDir = path.join(localPluginsRoot, safeSlug);
+    const resolvedDest = path.resolve(destDir);
     fs.rmSync(destDir, { recursive: true, force: true });
     fs.mkdirSync(destDir, { recursive: true });
     const unpacked = JSON.parse(zlib.gunzipSync(stdinBuf).toString('utf8'));
     for (const fileEntry of unpacked.files || []) {
       const rel = String(fileEntry.path || '').replace(/^\\/+/, '');
       if (!rel || rel.includes('..')) continue;
-      const fullPath = path.join(destDir, ...rel.split('/'));
+      const fullPath = path.resolve(destDir, ...rel.split('/'));
+      if (fullPath !== resolvedDest && !fullPath.startsWith(resolvedDest + path.sep)) continue;
       fs.mkdirSync(path.dirname(fullPath), { recursive: true });
       fs.writeFileSync(fullPath, Buffer.from(fileEntry.data, 'base64'), {
         mode: fileEntry.mode || 0o644,

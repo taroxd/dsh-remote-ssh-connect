@@ -546,6 +546,61 @@ function checkPortInUse(port) {
     };
   }
 
+  function handleListPlugins() {
+    const profileManifestPath = path.join(profileDir, 'package.json');
+    const builtinBundles = new Set([
+      '@deepseek-ai/dsh-base',
+      '@deepseek-ai/dsh-web-app',
+      '@deepseek-ai/dsh-headless',
+      '@deepseek-ai/dsh-acp-app',
+      '@deepseek-ai/dsh-sdk-app',
+      '@deepseek-ai/dsh-sdk-minimal',
+    ]);
+    if (!fs.existsSync(profileManifestPath)) {
+      return { plugins: [] };
+    }
+    let pm;
+    try {
+      pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
+    } catch {
+      return { plugins: [] };
+    }
+    const deps = pm.dependencies || {};
+    const enabledSet = new Set((pm.dsh && pm.dsh.profile && pm.dsh.profile.bundles) || []);
+    const plugins = [];
+    for (const [pkgName, recordedSpec] of Object.entries(deps)) {
+      if (builtinBundles.has(pkgName)) continue;
+      const pkgManifestPath = path.join(profileDir, 'node_modules', ...pkgName.split('/'), 'package.json');
+      let pkgM = null;
+      if (fs.existsSync(pkgManifestPath)) {
+        try {
+          pkgM = JSON.parse(fs.readFileSync(pkgManifestPath, 'utf8'));
+        } catch {}
+      }
+      if (pkgM && (!pkgM.dsh || !pkgM.dsh.bundle)) continue;
+      const pkgDir = path.dirname(pkgManifestPath);
+      let zhTitle = pkgName;
+      let enTitle = pkgName;
+      try {
+        const zhJson = JSON.parse(fs.readFileSync(path.join(pkgDir, 'locale', 'zh.json'), 'utf8'));
+        if (zhJson && zhJson.meta && zhJson.meta.title) zhTitle = zhJson.meta.title;
+      } catch {}
+      try {
+        const enJson = JSON.parse(fs.readFileSync(path.join(pkgDir, 'locale', 'en.json'), 'utf8'));
+        if (enJson && enJson.meta && enJson.meta.title) enTitle = enJson.meta.title;
+      } catch {}
+      plugins.push({
+        name: pkgName,
+        version: (pkgM && pkgM.version) ? String(pkgM.version).trim() : '0.0.0',
+        title: { zh: zhTitle, en: enTitle },
+        enabled: enabledSet.has(pkgName),
+        hasClientUi: Boolean(pkgM && pkgM.dsh && pkgM.dsh.client),
+        sourceKind: classifyRecordedSpec(recordedSpec) || 'npm',
+      });
+    }
+    return { plugins };
+  }
+
   async function handleInstallPlugin(reqId, params) {
     const pkgName = String(params.packageName || '');
     const sourceKind = String(params.sourceKind || 'npm');
@@ -562,8 +617,20 @@ function checkPortInUse(port) {
     await ensureRemotePnpm();
 
     const runDshPlugin = (pluginArgs) => runCommandAsync(process.execPath, [dshBin, 'plugin', '--profile', profile, ...pluginArgs], 300_000);
-    const registries = [null, 'https://registry.npmmirror.com/', 'https://registry.npmjs.org/'];
+    const registries = ['https://registry.npmmirror.com/', null, 'https://registry.npmjs.org/'];
     const profileManifestPath = path.join(profileDir, 'package.json');
+    const profileNpmrcPath = path.join(profileDir, '.npmrc');
+    if (fs.existsSync(profileDir) && !fs.existsSync(profileNpmrcPath)) {
+      try {
+        fs.writeFileSync(profileNpmrcPath, [
+          'registry=https://registry.npmmirror.com/',
+          'auto-install-peers=false',
+          'fetch-timeout=15000',
+          'fetch-retries=1',
+          '',
+        ].join('\\n'));
+      } catch {}
+    }
     const nodeModulesPkgDir = path.join(profileDir, 'node_modules', ...pkgName.split('/'));
 
     function isPluginStillInProfile() {
@@ -590,19 +657,21 @@ function checkPortInUse(port) {
       fs.mkdirSync(localPluginsRoot, { recursive: true });
 
       if (localSubkind === 'tarball') {
-        const baseName = path.basename(tarballFilename);
+        const baseName = path.basename(tarballFilename).replace(/[^A-Za-z0-9._-]/g, '_');
         const destTarball = path.join(localPluginsRoot, baseName.startsWith(safeSlug) ? baseName : (safeSlug + '-' + baseName));
         fs.writeFileSync(destTarball, stdinBuf);
         targetSpec = 'file:' + destTarball;
       } else {
         const destDir = path.join(localPluginsRoot, safeSlug);
+        const resolvedDest = path.resolve(destDir);
         fs.rmSync(destDir, { recursive: true, force: true });
         fs.mkdirSync(destDir, { recursive: true });
         const unpacked = JSON.parse(zlib.gunzipSync(stdinBuf).toString('utf8'));
         for (const fileEntry of unpacked.files || []) {
           const rel = String(fileEntry.path || '').replace(/^\\/+/, '');
           if (!rel || rel.includes('..')) continue;
-          const fullPath = path.join(destDir, ...rel.split('/'));
+          const fullPath = path.resolve(destDir, ...rel.split('/'));
+          if (fullPath !== resolvedDest && !fullPath.startsWith(resolvedDest + path.sep)) continue;
           fs.mkdirSync(path.dirname(fullPath), { recursive: true });
           fs.writeFileSync(fullPath, Buffer.from(fileEntry.data, 'base64'), {
             mode: fileEntry.mode || 0o644,
@@ -623,8 +692,11 @@ function checkPortInUse(port) {
                   '--prod',
                   '--ignore-scripts',
                   '--no-frozen-lockfile',
+                  '--config.auto-install-peers=false',
+                  '--config.fetch-timeout=15000',
+                  '--config.fetch-retries=1',
                   ...(reg ? ['--registry=' + reg] : []),
-                ], 180_000);
+                ], 60_000);
                 if (depRes.status === 0) break;
               }
             }
@@ -694,7 +766,7 @@ function checkPortInUse(port) {
         enabled: true,
         ...(sourceKind === 'npm' ? { saveExact: true } : {}),
       };
-      for (const reg of [undefined, 'https://registry.npmmirror.com/', 'https://registry.npmjs.org/']) {
+      for (const reg of ['https://registry.npmmirror.com/', undefined, 'https://registry.npmjs.org/']) {
         const opts = reg === undefined ? baseInstallOpts : { ...baseInstallOpts, registry: reg };
         const apiAdd = await callRemotePluginManager('installBundle', {
           spec: targetSpec,
@@ -839,6 +911,9 @@ function checkPortInUse(port) {
         if (req.method === 'check_plugin') {
           return handleCheckPlugin(req.params || {});
         }
+        if (req.method === 'list_plugins') {
+          return handleListPlugins();
+        }
         if (req.method === 'install_plugin') {
           return await handleInstallPlugin(req.id, req.params || {});
         }
@@ -905,7 +980,7 @@ check_port_conflict() {
 
   if [ -n "$SS_OUT" ]; then
     if [ -n "$OCCUPANT_PID" ] && [ -r "/proc/$OCCUPANT_PID/cmdline" ]; then
-      OCCUPANT_CMD=$(tr '\\0' ' ' < "/proc/$OCCUPANT_PID/cmdline" | sed 's/[[:space:]]*$//' | tr '"' "'" || true)
+      OCCUPANT_CMD=$(tr '\\0\\n\\r\\\\"' '     ' < "/proc/$OCCUPANT_PID/cmdline" | tr -cd '\\40-\\176' | cut -c1-200 | sed 's/[[:space:]]*$//' || true)
     fi
     if [ -n "$OCCUPANT_PID" ]; then
       emit_json "{\\"type\\":\\"port_in_use\\",\\"port\\":$REMOTE_PORT,\\"pid\\":$OCCUPANT_PID,\\"command\\":\\"$OCCUPANT_CMD\\"}"
@@ -1093,7 +1168,7 @@ EOF
   done
 
   if [ "$INSTALLED_OK" != "1" ] || [ ! -f "$STAGE_DIR/node_modules/@deepseek-ai/dsh/lib/bin.js" ]; then
-    ERR_TAIL=$(tail -n 5 "$BASE_DIR/logs/npm-install.err" 2>/dev/null | tr '\\n"' '  ' || echo "npm install failed")
+    ERR_TAIL=$(tail -n 5 "$BASE_DIR/logs/npm-install.err" 2>/dev/null | tr '\\n\\r\\\\"' '    ' | tr -cd '\\40-\\176' | cut -c1-300 || echo "npm install failed")
     rm -rf "$STAGE_DIR"
     emit_json "{\\"type\\":\\"error\\",\\"message\\":\\"Failed to install @deepseek-ai/dsh@$DSH_VERSION on remote host: $ERR_TAIL\\"}"
     exit 1
