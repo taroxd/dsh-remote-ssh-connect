@@ -20,5 +20,5 @@ jobs:
         with:
           node-version: 24
       - run: npm test
-      - run: node -e "require('node:fs').mkdirSync('artifacts', { recursive: true })"
-      - run: npm pack --pack-destination artifacts
+      - run: mkdir -p artifacts && npm pack --pack-destination artifacts
+        shell: bash
