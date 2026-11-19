@@ -377,6 +377,11 @@ export function apply(ctx, config = {}) {
         }
       }
     },
+    onSaveWorkspaceOrder: async (workspaceOrder) => {
+      if (hostConfigsTable !== undefined && Array.isArray(workspaceOrder)) {
+        await hostConfigsTable.put('__workspace_order__', normalizeHostConfig({ workspaceOrder }))
+      }
+    },
   })
 
   ctx.effect(() => {
@@ -402,6 +407,12 @@ export function apply(ctx, config = {}) {
           }
           hostConfigsTable = domain.table('host_configs')
           for (const [hostKey, record] of hostConfigsTable.entries()) {
+            if (hostKey === '__workspace_order__') {
+              if (Array.isArray(record?.workspaceOrder)) {
+                manager.workspaceBridge.loadInitialWorkspaceOrder(record.workspaceOrder)
+              }
+              continue
+            }
             if (!manager.hostConfigs.has(hostKey)) {
               manager.hostConfigs.set(hostKey, normalizeHostConfig(record))
             }
@@ -464,6 +475,8 @@ export function apply(ctx, config = {}) {
   ))
   registerRoute(ctx, 'synced-workspaces', () => manager.listSyncedWorkspaces())
   registerRoute(ctx, 'compare-plugins', (body) => manager.compareHostPlugins(body.host))
+  registerRoute(ctx, 'model-catalog', (body) => manager.getRemoteModelCatalog(body))
+  registerRoute(ctx, 'session-host', (body) => manager.getSessionHost(body.sessionId))
   registerRoute(ctx, 'auth-submit', (body) => manager.submitAuth(body.host, {
     promptId: body.promptId,
     value: body.value,

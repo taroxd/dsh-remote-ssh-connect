@@ -1,8 +1,8 @@
 {
   "name": "dsh-remote-ssh-connect",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
-  "description": "Connect to remote Linux hosts over SSH, provision matching DSH versions in ~/.dsh-remote-ssh-connect, sync local plugins and remote workspaces into a dedicated Remote Workspaces sidebar section, and forward ports for local browser access.",
+  "description": "Connect to remote Linux hosts over SSH, provision matching DSH versions in ~/.dsh-remote-ssh-connect, sync local plugins and remote workspaces for direct local control, and forward ports for browser access.",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -52,7 +52,8 @@
         "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-workspace",
         "@deepseek-ai/dsh-client-ui-context-menu",
-        "@deepseek-ai/dsh-client-ui-conversation"
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-model-selection"
       ]
     }
   }

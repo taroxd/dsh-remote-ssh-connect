@@ -918,10 +918,15 @@ Match host 203.0.113.*
       host: 'prod-box',
       remoteWorkspaceId: 'ws-123',
       remotePath: '/home/ubuntu/backend',
-      title: 'backend',
+      title: 'backend (prod-box) (prod-box)',
     })
     assert.equal(normRec.localWorkspaceId, 'remote:prod-box:ws-123')
+    assert.equal(normRec.title, 'backend (prod-box)', 'Repeated host suffixes must be deduplicated')
     assert.equal(normRec.invalidated, false)
+
+    const cfgWithCollapsed = normalizeHostConfig({ remotePort: 3080, localPort: 0, profile: 'web', pluginDiffCollapsed: true })
+    assert.equal(cfgWithCollapsed.pluginDiffCollapsed, true)
+    assert.deepEqual(validateHostConfigInput({ pluginDiffCollapsed: true }), { pluginDiffCollapsed: true })
 
     const tmpRoot = await mkdtemp(join(tmpdir(), 'dsh-rc-wsbridge-test-'))
     try {
@@ -1139,6 +1144,19 @@ Match host 203.0.113.*
             const req = args.request ?? args
             remotePromptsReceived.push(req)
             value = { accepted: true }
+          } else if (endpoint === 'session/modelCatalog') {
+            value = {
+              default: { provider: 'remote-provider', model: 'remote-model-v1' },
+              routableProviders: ['remote-provider'],
+              groups: [
+                {
+                  id: 'remote-provider',
+                  name: 'Remote Provider',
+                  models: [{ id: 'remote-model-v1', name: 'Remote Model v1' }],
+                },
+              ],
+              failures: [],
+            }
           } else if (endpoint === 'customLocalOnly/someAction') {
             return Response.json({
               type: 'server-response',
@@ -1234,6 +1252,7 @@ Match host 203.0.113.*
       }
 
       const savedWorkspacesInStorage = new Map()
+      let savedWorkspaceOrder = null
       const manager = new RemoteConnectionManager({
         sshConfigPath,
         localProfileDir: profileDir,
@@ -1244,6 +1263,9 @@ Match host 203.0.113.*
         onSaveWorkspace: async (id, rec) => {
           if (rec === null) savedWorkspacesInStorage.delete(id)
           else savedWorkspacesInStorage.set(id, rec)
+        },
+        onSaveWorkspaceOrder: async (order) => {
+          savedWorkspaceOrder = [...order]
         },
       })
 
@@ -1354,6 +1376,59 @@ Match host 203.0.113.*
           async () => ({ ok: false }),
         )
         assert.deepEqual(fallbackListRes, { ok: true, value: [] })
+
+        // Verify remote model catalog resolution for remote host & remote session while keeping local modelCatalog purely local
+        const localCatalogIntercept = await manager.workspaceBridge.interceptRpc(
+          'session/modelCatalog',
+          { args: {} },
+          undefined,
+          {},
+          async () => ({ ok: true, value: 'local-catalog' }),
+        )
+        assert.equal(localCatalogIntercept, undefined, 'Local session/modelCatalog must delegate to local Host without merging remote models')
+
+        const remoteSessionHost = manager.getSessionHost('session-remote-1')
+        assert.equal(remoteSessionHost.host, 'ws-box')
+
+        const remoteCatalogBySession = await manager.getRemoteModelCatalog({ sessionId: 'session-remote-1' })
+        assert.equal(remoteCatalogBySession.host, 'ws-box')
+        assert.equal(remoteCatalogBySession.catalog.default.model, 'remote-model-v1')
+        assert.deepEqual(
+          remoteCatalogBySession.catalog.groups.map((g) => g.id),
+          ['remote-provider'],
+        )
+
+        // Verify interleaved drag-and-drop reordering between local and remote workspaces via workspace/insertBefore
+        manager.workspaceBridge.localWorkspaceBaseline.items = [
+          { workspaceId: 'local-ws-1', path: '/local/1', title: 'Local 1', sessionIds: [], createdAt: '', updatedAt: '' },
+          { workspaceId: 'local-ws-2', path: '/local/2', title: 'Local 2', sessionIds: [], createdAt: '', updatedAt: '' },
+        ]
+        manager.workspaceBridge.loadInitialWorkspaceOrder(['local-ws-1', 'local-ws-2', 'remote:ws-box:rws-alpha'])
+
+        const reorderRes = await manager.workspaceBridge.interceptRpc(
+          'workspace/insertBefore',
+          {
+            args: {
+              request: {
+                workspaceId: 'remote:ws-box:rws-alpha',
+                beforeWorkspaceId: 'local-ws-2',
+              },
+            },
+          },
+          undefined,
+          {},
+          async () => ({ ok: true, value: { workspaceIds: ['local-ws-1', 'local-ws-2'] } }),
+        )
+        assert.equal(reorderRes.ok, true)
+        assert.deepEqual(
+          reorderRes.value.workspaceIds,
+          ['local-ws-1', 'remote:ws-box:rws-alpha', 'local-ws-2'],
+          'Remote and local workspaces must support free interleaved drag-and-drop ordering',
+        )
+        assert.deepEqual(
+          savedWorkspaceOrder,
+          ['local-ws-1', 'remote:ws-box:rws-alpha', 'local-ws-2'],
+        )
 
         // 3. Disconnect host -> remote workspace stays in Workspaces list, but its sessionIds become [] (sessions hidden)
         await manager.disconnectHost('ws-box')
@@ -1529,7 +1604,13 @@ Match host 203.0.113.*
           bind: () => (k) => k,
         },
         slots: {
-          inject: (_slot, cb) => cb(),
+          inject: (_slot, cb) => {
+            const res = cb()
+            if (res && typeof res[Symbol.iterator] === 'function') {
+              for (const _ of res) { /* drain generator */ }
+            }
+            return () => {}
+          },
           register: (spec, comp) => {
             registeredSlots.push({ spec, comp })
             return () => {}
@@ -1540,10 +1621,28 @@ Match host 203.0.113.*
       pluginExport.apply(mockClientCtx)
       assert.deepEqual(
         registeredSlots.map((s) => s.spec.name),
-        ['shell.overlay', 'conversation.session.header.actions', 'main', 'sidebar.panellist'],
+        [
+          'contextMenu.icon',
+          'contextMenu.icon',
+          'contextMenu.icon',
+          'shell.overlay',
+          'conversation.session.header.actions',
+          'main',
+          'sidebar.panellist',
+        ],
       )
       assert.equal(registeredDicts?.en?.syncWorkspaceLabel, 'Remote workspace')
       assert.equal(registeredDicts?.zh?.syncWorkspaceLabel, '远程工作区')
+      assert.equal(registeredDicts?.en?.btnCollapseDiff, 'Collapse')
+      assert.equal(registeredDicts?.en?.btnExpandDiff, 'Expand')
+      assert.equal(registeredDicts?.zh?.btnCollapseDiff, '收起')
+      assert.equal(registeredDicts?.zh?.btnExpandDiff, '展开')
+      assert.equal(clientCode.includes('dsh-rc-eye-btn'), true, 'AuthModal must use an inline eye icon button')
+      assert.equal(
+        clientCode.includes('[data-row-key^="workspace:remote:"] > span:first-child::after'),
+        true,
+        'Remote workspaces in Workspaces list must render the VS Code-style remote corner badge',
+      )
       assert.equal(validateHostAlias('prod-gpu'), 'prod-gpu')
       assert.throws(() => validateHostAlias('-oProxyCommand=evil'), /cannot start with "-"/)
       assert.throws(() => validateHostAlias('bad:host'), /forbidden characters/)

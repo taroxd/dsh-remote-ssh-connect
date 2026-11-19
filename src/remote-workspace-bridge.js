@@ -63,7 +63,11 @@ export function normalizeSyncedWorkspaceRecord(raw = {}) {
     : makeLocalWorkspaceId(host, remoteWorkspaceId)
   const remotePath = String(raw.remotePath ?? raw.path ?? '/').trim() || '/'
   const defaultTitle = remotePath.split(/[\\/]/).filter(Boolean).pop() || remotePath
-  const title = String(raw.title ?? '').trim() || defaultTitle
+  let title = String(raw.title ?? '').trim() || defaultTitle
+  const hostSuffix = ` (${host})`
+  while (title.endsWith(`${hostSuffix}${hostSuffix}`)) {
+    title = title.slice(0, -hostSuffix.length)
+  }
   const nowIso = new Date().toISOString()
   const createdAt = typeof raw.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt.trim() : nowIso
   const updatedAt = typeof raw.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt.trim() : createdAt
@@ -1102,6 +1106,7 @@ export class RemoteWorkspaceBridge {
    */
   constructor(options = {}) {
     this.onSaveWorkspace = options.onSaveWorkspace ?? (async () => {})
+    this.onSaveWorkspaceOrder = options.onSaveWorkspaceOrder ?? (async () => {})
     this.fetchImpl = options.fetchImpl
     this.createWs = options.createWs
 
@@ -1109,6 +1114,8 @@ export class RemoteWorkspaceBridge {
     this.syncedWorkspaces = new Map()
     /** @type {string[]} ordered localWorkspaceIds */
     this.syncedWorkspaceOrder = []
+    /** @type {string[]} interleaved local + remote workspaceIds */
+    this.combinedWorkspaceOrder = []
 
     /** @type {Map<string, RemoteHostGatewayClient>} host -> client */
     this.hostClients = new Map()
@@ -1170,7 +1177,7 @@ export class RemoteWorkspaceBridge {
               pinnedSessionIds: [...(raw?.pinnedSessionIds ?? [])],
             }
             return {
-              items: [...localItems, ...this.getProjectedWorkspaceViews()],
+              items: this.getOrderedWorkspaceViews(localItems),
               archivedSessionIds: this.getCombinedArchivedSessionIds(),
               pinnedSessionIds: this.getCombinedPinnedSessionIds(),
             }
@@ -1200,6 +1207,91 @@ export class RemoteWorkspaceBridge {
   }
 
   /**
+   * Load persisted interleaved workspace order (`local` + `remote:*` IDs).
+   * @param {string[]} order
+   */
+  loadInitialWorkspaceOrder(order) {
+    if (!Array.isArray(order)) return
+    const seen = new Set()
+    const clean = []
+    for (const id of order) {
+      if (typeof id === 'string' && id.trim() && !seen.has(id.trim())) {
+        seen.add(id.trim())
+        clean.push(id.trim())
+      }
+    }
+    this.combinedWorkspaceOrder = clean
+    const remoteInOrder = clean.filter((id) => parseLocalWorkspaceId(id) !== null)
+    if (remoteInOrder.length > 0) {
+      const rest = this.syncedWorkspaceOrder.filter((id) => !remoteInOrder.includes(id))
+      this.syncedWorkspaceOrder = [...remoteInOrder, ...rest]
+    }
+  }
+
+  /**
+   * Reconcile `this.combinedWorkspaceOrder` against current local workspace items and synced remote workspaces.
+   * @param {object[]} [localItemsOverride]
+   * @returns {string[]}
+   */
+  getOrderedWorkspaceIds(localItemsOverride) {
+    const localItems = Array.isArray(localItemsOverride)
+      ? localItemsOverride
+      : (this.localWorkspaceBaseline.items ?? [])
+    const localIds = localItems
+      .map((w) => w?.workspaceId)
+      .filter((id) => typeof id === 'string' && parseLocalWorkspaceId(id) === null)
+    const remoteViews = this.getProjectedWorkspaceViews()
+    const remoteIds = remoteViews.map((w) => w.workspaceId)
+    const validSet = new Set([...localIds, ...remoteIds])
+
+    const result = []
+    const seen = new Set()
+    for (const id of this.combinedWorkspaceOrder) {
+      if (validSet.has(id) && !seen.has(id)) {
+        seen.add(id)
+        result.push(id)
+      }
+    }
+    for (const id of localIds) {
+      if (!seen.has(id)) {
+        seen.add(id)
+        result.push(id)
+      }
+    }
+    for (const id of remoteIds) {
+      if (!seen.has(id)) {
+        seen.add(id)
+        result.push(id)
+      }
+    }
+    this.combinedWorkspaceOrder = result
+    return result
+  }
+
+  /**
+   * Return interleaved local and remote `WorkspaceView[]` in `getOrderedWorkspaceIds()` order.
+   * @param {object[]} [localItemsOverride]
+   */
+  getOrderedWorkspaceViews(localItemsOverride) {
+    const localItems = Array.isArray(localItemsOverride)
+      ? localItemsOverride
+      : (this.localWorkspaceBaseline.items ?? [])
+    const byId = new Map()
+    for (const w of localItems) {
+      if (w?.workspaceId && parseLocalWorkspaceId(w.workspaceId) === null) {
+        byId.set(w.workspaceId, w)
+      }
+    }
+    for (const w of this.getProjectedWorkspaceViews()) {
+      if (w?.workspaceId) {
+        byId.set(w.workspaceId, w)
+      }
+    }
+    const orderedIds = this.getOrderedWorkspaceIds(localItems)
+    return orderedIds.map((id) => byId.get(id)).filter(Boolean)
+  }
+
+  /**
    * Load initial synced workspace records from storageDomain.
    * @param { Iterable<[string, object]> | Record<string, object> } entries
    */
@@ -1215,6 +1307,13 @@ export class RemoteWorkspaceBridge {
           this.syncedWorkspaceOrder.push(record.localWorkspaceId)
         }
       } catch {}
+    }
+    if (this.combinedWorkspaceOrder.length > 0) {
+      const remoteInOrder = this.combinedWorkspaceOrder.filter(
+        (id) => this.syncedWorkspaces.has(id),
+      )
+      const rest = this.syncedWorkspaceOrder.filter((id) => !remoteInOrder.includes(id))
+      this.syncedWorkspaceOrder = [...remoteInOrder, ...rest]
     }
   }
 
@@ -1477,9 +1576,11 @@ export class RemoteWorkspaceBridge {
     }
 
     const localWorkspaceId = makeLocalWorkspaceId(hostKey, remoteWs.workspaceId)
+    const hostSuffix = ` (${hostKey})`
+    const rawRemoteTitle = String(remoteWs.title || '').trim()
     const displayTitle = options.title
       ? String(options.title).trim()
-      : `${remoteWs.title} (${hostKey})`
+      : (rawRemoteTitle.endsWith(hostSuffix) ? rawRemoteTitle : `${rawRemoteTitle}${hostSuffix}`)
 
     const record = normalizeSyncedWorkspaceRecord({
       localWorkspaceId,
@@ -1500,6 +1601,10 @@ export class RemoteWorkspaceBridge {
         localWorkspaceId,
         ...this.syncedWorkspaceOrder.filter((id) => id !== localWorkspaceId),
       ]
+      if (!this.combinedWorkspaceOrder.includes(localWorkspaceId)) {
+        this.combinedWorkspaceOrder = [localWorkspaceId, ...this.combinedWorkspaceOrder]
+        await this.onSaveWorkspaceOrder(this.combinedWorkspaceOrder)
+      }
     }
     await this.onSaveWorkspace(localWorkspaceId, record)
 
@@ -1548,6 +1653,10 @@ export class RemoteWorkspaceBridge {
     this.syncedWorkspaces.delete(id)
     this._projectedUpdatedAtState.delete(id)
     this.syncedWorkspaceOrder = this.syncedWorkspaceOrder.filter((k) => k !== id)
+    if (this.combinedWorkspaceOrder.includes(id)) {
+      this.combinedWorkspaceOrder = this.combinedWorkspaceOrder.filter((k) => k !== id)
+      await this.onSaveWorkspaceOrder(this.combinedWorkspaceOrder)
+    }
     await this.onSaveWorkspace(id, null)
 
     this._reconcileHostSessions(record.host)
@@ -1868,11 +1977,10 @@ export class RemoteWorkspaceBridge {
         }
       } catch {}
     }
-    const localIds = this.localWorkspaceBaseline.items.map((w) => w.workspaceId)
-    const remoteIds = this.getProjectedWorkspaceViews().map((w) => w.workspaceId)
+    const workspaceIds = [...this.getOrderedWorkspaceIds()]
     this._broadcastWorkspaceFrame({
       type: 'order',
-      workspaceIds: [...localIds, ...remoteIds],
+      workspaceIds,
     })
   }
 
@@ -1973,18 +2081,42 @@ export class RemoteWorkspaceBridge {
       }
 
       if (sub === 'insertBefore' && typeof req?.workspaceId === 'string') {
-        const isMovedRemote = parseLocalWorkspaceId(req.workspaceId) !== null
-        const isAnchorRemote = typeof req.beforeWorkspaceId === 'string' && parseLocalWorkspaceId(req.beforeWorkspaceId) !== null
-        if (isMovedRemote || isAnchorRemote) {
-          if (isMovedRemote && this.syncedWorkspaces.has(req.workspaceId)) {
-            const without = this.syncedWorkspaceOrder.filter((id) => id !== req.workspaceId)
-            const at = isAnchorRemote && without.includes(req.beforeWorkspaceId)
-              ? without.indexOf(req.beforeWorkspaceId)
-              : without.length
-            this.syncedWorkspaceOrder = [...without.slice(0, at), req.workspaceId, ...without.slice(at)]
+        const currentOrder = this.getOrderedWorkspaceIds()
+        const movedId = req.workspaceId
+        const beforeId = typeof req.beforeWorkspaceId === 'string' && req.beforeWorkspaceId
+          ? req.beforeWorkspaceId
+          : undefined
+        if (currentOrder.includes(movedId)) {
+          if (beforeId !== movedId && (beforeId === undefined || currentOrder.includes(beforeId))) {
+            const without = currentOrder.filter((id) => id !== movedId)
+            const at = beforeId === undefined ? without.length : without.indexOf(beforeId)
+            this.combinedWorkspaceOrder = [...without.slice(0, at), movedId, ...without.slice(at)]
           }
-          const localIds = this.localWorkspaceBaseline.items.map((w) => w.workspaceId)
-          const workspaceIds = [...localIds, ...this.syncedWorkspaceOrder]
+          this.syncedWorkspaceOrder = this.combinedWorkspaceOrder.filter(
+            (id) => parseLocalWorkspaceId(id) !== null,
+          )
+          await this.onSaveWorkspaceOrder(this.combinedWorkspaceOrder)
+          if (parseLocalWorkspaceId(movedId) === null && typeof callLocalRpc === 'function') {
+            const movedIdx = this.combinedWorkspaceOrder.indexOf(movedId)
+            const nextLocalAnchor = this.combinedWorkspaceOrder
+              .slice(movedIdx + 1)
+              .find((id) => parseLocalWorkspaceId(id) === null)
+            await callLocalRpc(
+              endpoint,
+              {
+                ...payload,
+                args: {
+                  request: {
+                    workspaceId: movedId,
+                    ...(nextLocalAnchor ? { beforeWorkspaceId: nextLocalAnchor } : {}),
+                  },
+                },
+              },
+              signal,
+              peer,
+            ).catch(() => {})
+          }
+          const workspaceIds = [...this.combinedWorkspaceOrder]
           this._broadcastWorkspaceFrame({ type: 'order', workspaceIds })
           return { ok: true, value: { workspaceIds } }
         }
@@ -2144,31 +2276,28 @@ export class RemoteWorkspaceBridge {
       return undefined
     }
 
-    // 5. session/modelCatalog: merge remote models from connected hosts so remote sessions can pick any remote model
+    // 5. session/modelCatalog: if targeted at a specific remote host or remote session, return that remote host's catalog;
+    //    otherwise delegate to the local Host so local sessions see only locally configured models.
     if (endpoint === 'session/modelCatalog') {
-      const localRes = await callLocalRpc(endpoint, payload, signal, peer)
-      if (!localRes.ok || this.hostClients.size === 0) return localRes
-      const mergedGroups = [...(localRes.value?.groups ?? [])]
-      const seenProviders = new Set(mergedGroups.map((g) => g.id))
-      for (const client of this.hostClients.values()) {
-        if (client.disposed) continue
-        const rCat = await client.callRpc('session/modelCatalog', {}, signal, 8_000).catch(() => null)
-        if (rCat?.ok && Array.isArray(rCat.value?.groups)) {
-          for (const g of rCat.value.groups) {
-            if (g?.id && !seenProviders.has(g.id)) {
-              seenProviders.add(g.id)
-              mergedGroups.push(g)
-            }
+      const targetSessionId = extractSessionIdFromArgs(args)
+      const targetHost = (typeof args?.host === 'string' && args.host.trim())
+        ? args.host.trim()
+        : (targetSessionId ? this.getHostForSession(targetSessionId) : null)
+      if (targetHost) {
+        const client = this.hostClients.get(targetHost)
+        if (!client || client.disposed) {
+          return {
+            ok: false,
+            error: {
+              code: 'workspace/not-connected',
+              message: `Remote host "${targetHost}" is not connected.`,
+              details: { host: targetHost },
+            },
           }
         }
+        return client.callRpc('session/modelCatalog', {}, signal, 15_000)
       }
-      return {
-        ok: true,
-        value: {
-          ...localRes.value,
-          groups: mergedGroups,
-        },
-      }
+      return undefined
     }
 
     // 6. Any Session-scoped / Agent-scoped RPC (session/*, workspaceFiles/*, terminal/*, jobs/*, commands/*, skills/*, fileReferences/*, fileUploads/*, actionCards/*, userQuestions/*, etc.)
@@ -2246,37 +2375,44 @@ export class RemoteWorkspaceBridge {
           if (signal?.aborted) break
           if (frame.type === 'baseline' || frame.type === 'replace') {
             this.localWorkspaceBaseline = {
-              items: [...(frame.value?.items ?? [])],
+              items: [...(frame.value?.items ?? [])].filter((w) => parseLocalWorkspaceId(w.workspaceId) === null),
               archivedSessionIds: [...(frame.value?.archivedSessionIds ?? [])],
               pinnedSessionIds: [...(frame.value?.pinnedSessionIds ?? [])],
             }
             queue.push({
               type: frame.type,
               value: {
-                items: [
-                  ...this.localWorkspaceBaseline.items,
-                  ...this.getProjectedWorkspaceViews(),
-                ],
+                items: this.getOrderedWorkspaceViews(this.localWorkspaceBaseline.items),
                 archivedSessionIds: this.getCombinedArchivedSessionIds(),
                 pinnedSessionIds: this.getCombinedPinnedSessionIds(),
               },
             })
           } else if (frame.type === 'upsert') {
             if (parseLocalWorkspaceId(frame.workspace?.workspaceId) !== null) continue
-            const idx = this.localWorkspaceBaseline.items.findIndex((w) => w.workspaceId === frame.workspace.workspaceId)
-            if (idx >= 0) this.localWorkspaceBaseline.items[idx] = frame.workspace
-            else this.localWorkspaceBaseline.items.unshift(frame.workspace)
+            const wsId = frame.workspace.workspaceId
+            const idx = this.localWorkspaceBaseline.items.findIndex((w) => w.workspaceId === wsId)
+            if (idx >= 0) {
+              this.localWorkspaceBaseline.items[idx] = frame.workspace
+            } else {
+              this.localWorkspaceBaseline.items.unshift(frame.workspace)
+              if (!this.combinedWorkspaceOrder.includes(wsId)) {
+                this.combinedWorkspaceOrder = [wsId, ...this.combinedWorkspaceOrder]
+                void this.onSaveWorkspaceOrder(this.combinedWorkspaceOrder)
+              }
+            }
             queue.push(frame)
           } else if (frame.type === 'remove') {
             if (parseLocalWorkspaceId(frame.workspaceId) !== null) continue
             this.localWorkspaceBaseline.items = this.localWorkspaceBaseline.items.filter((w) => w.workspaceId !== frame.workspaceId)
+            if (this.combinedWorkspaceOrder.includes(frame.workspaceId)) {
+              this.combinedWorkspaceOrder = this.combinedWorkspaceOrder.filter((id) => id !== frame.workspaceId)
+              void this.onSaveWorkspaceOrder(this.combinedWorkspaceOrder)
+            }
             queue.push(frame)
           } else if (frame.type === 'order') {
-            const localOnlyIds = (frame.workspaceIds ?? []).filter((id) => parseLocalWorkspaceId(id) === null)
-            const remoteIds = this.getProjectedWorkspaceViews().map((w) => w.workspaceId)
             queue.push({
               type: 'order',
-              workspaceIds: [...new Set([...localOnlyIds, ...remoteIds])],
+              workspaceIds: [...this.getOrderedWorkspaceIds()],
             })
           } else if (frame.type === 'archived') {
             this.localWorkspaceBaseline.archivedSessionIds = [...frame.archivedSessionIds]

@@ -104,6 +104,10 @@ export function normalizeHostConfig(raw = {}) {
       ? localPortNum
       : DEFAULT_LOCAL_PORT,
     profile: profileStr,
+    ...(typeof raw.pluginDiffCollapsed === 'boolean' ? { pluginDiffCollapsed: raw.pluginDiffCollapsed } : {}),
+    ...(Array.isArray(raw.workspaceOrder)
+      ? { workspaceOrder: raw.workspaceOrder.filter((id) => typeof id === 'string') }
+      : {}),
   }
 }
 
@@ -150,6 +154,9 @@ export function validateHostConfigInput(input = {}) {
     }
     next.profile = prof
   }
+  if (input.pluginDiffCollapsed !== undefined) {
+    next.pluginDiffCollapsed = Boolean(input.pluginDiffCollapsed)
+  }
   return next
 }
 
@@ -177,6 +184,7 @@ export class RemoteConnectionManager {
     this.customDshTarballUrl = options.customDshTarballUrl
     this.onSaveConfig = options.onSaveConfig ?? (async () => {})
     this.onSaveWorkspace = options.onSaveWorkspace ?? (async () => {})
+    this.onSaveWorkspaceOrder = options.onSaveWorkspaceOrder ?? (async () => {})
     this.openBrowser = options.openBrowser ?? openUrlInDefaultBrowser
     this.spawnProcess = options.spawnProcess ?? spawn
 
@@ -188,6 +196,7 @@ export class RemoteConnectionManager {
 
     this.workspaceBridge = new RemoteWorkspaceBridge({
       onSaveWorkspace: (localWsId, record) => this.onSaveWorkspace(localWsId, record),
+      onSaveWorkspaceOrder: (order) => this.onSaveWorkspaceOrder(order),
       fetchImpl: options.fetchImpl,
       createWs: options.createWs,
     })
@@ -1247,6 +1256,55 @@ export class RemoteConnectionManager {
     return {
       syncedWorkspaces: items,
       invalidatedWorkspaces: items.filter((w) => w.invalidated),
+    }
+  }
+
+  /**
+   * Resolve which remote host (if any) owns `sessionId`.
+   * @param {string} sessionId
+   */
+  getSessionHost(sessionId) {
+    const sid = typeof sessionId === 'string' ? sessionId.trim() : ''
+    if (!sid) return { host: null }
+    const host = this.workspaceBridge.getHostForSession(sid)
+    return { host: host || null }
+  }
+
+  /**
+   * Fetch the remote `session/modelCatalog` from a connected remote host (resolved by `host` or `sessionId`).
+   * @param {object} [options]
+   * @param {string} [options.host]
+   * @param {string} [options.sessionId]
+   */
+  async getRemoteModelCatalog(options = {}) {
+    const explicitHost = typeof options?.host === 'string' && options.host.trim()
+      ? options.host.trim()
+      : null
+    const sessionHost = !explicitHost && typeof options?.sessionId === 'string' && options.sessionId.trim()
+      ? this.workspaceBridge.getHostForSession(options.sessionId.trim())
+      : null
+    const targetHost = explicitHost || sessionHost
+    if (!targetHost) {
+      throw new Error('Remote host alias or remote sessionId is required.')
+    }
+    const sess = this.sessions.get(targetHost)
+    if (!sess || sess.status !== 'connected') {
+      throw new Error(`Remote host "${targetHost}" is not connected.`)
+    }
+    if (!this.workspaceBridge.isHostConnected(targetHost) && sess.url) {
+      await this.workspaceBridge.onHostConnected(targetHost, sess.url)
+    }
+    const client = this.workspaceBridge.hostClients.get(targetHost)
+    if (!client || client.disposed) {
+      throw new Error(`Remote gateway client for "${targetHost}" is not available.`)
+    }
+    const res = await client.callRpc('session/modelCatalog', {}, undefined, 15_000)
+    if (!res?.ok) {
+      throw new Error(res?.error?.message || `Failed to load model catalog from remote host "${targetHost}"`)
+    }
+    return {
+      host: targetHost,
+      catalog: res.value,
     }
   }
 

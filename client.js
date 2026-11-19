@@ -1,9 +1,11 @@
 // Client half of dsh-remote-ssh-connect:
-// 1. Registers "SSH 连接" / "SSH connect" in the left navigation sidebar and renders the SSH Management Panel.
-// 2. Supports listing and synchronizing remote workspaces into the local DSH sidebar, with persistent non-blocking plugin diff hints.
-// 3. Renders a dedicated "Remote Workspaces" ("远程工作区") section in the left sidebar right above "Workspaces",
-//    hiding sessions and replacing the "New Session" button with "连接主机" (Connect Host) when disconnected,
-//    synchronizing sessions and session actions when connected, and popping up an invalidation modal when a remote workspace is deleted.
+// 1. Registers "SSH connect" in the left navigation sidebar and renders the SSH Management Panel.
+// 2. Supports listing and synchronizing remote workspaces directly into the built-in DSH Workspaces list,
+//    allowing free drag-and-drop mixed ordering of local and remote workspaces and rendering a VS Code-style
+//    remote corner badge on remote workspace folder icons.
+// 3. Synchronizes each remote workspace's selectable model catalog from its connected remote host.
+// 4. Provides collapsible Local & remote plugin difference hints with long-term persisted collapse/expand state,
+//    and an inline eye icon toggle on the SSH password/secret authentication input.
 // Uses only official --dsw-alias-* theme tokens and React (no private primitive imports).
 
 window.__ModuleLoader__.load({
@@ -20,7 +22,7 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'remote-ssh-connect'
     const REMOTE_WS_PREFIX = 'remote:'
     const CORDIS_ORIGINAL = Symbol.for('cordis.original')
-    const DISMISSED_DIFF_STORAGE_KEY = 'dsh.remoteSshConnect.dismissedPluginDiffs'
+    const COLLAPSED_DIFF_STORAGE_KEY = 'dsh.remoteSshConnect.collapsedPluginDiffs.v1'
 
     function unwrapCordisService(svc) {
       if (!svc || typeof svc !== 'object') return svc
@@ -44,29 +46,17 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function computePluginDiffKey(diff) {
-      if (!diff || typeof diff !== 'object') return ''
-      const r = Array.isArray(diff.missingOnRemote)
-        ? diff.missingOnRemote.map((p) => `${p.name}@${p.version || ''}`).sort().join(',')
-        : ''
-      const l = Array.isArray(diff.missingOnLocal)
-        ? diff.missingOnLocal.map((p) => `${p.name}@${p.version || ''}`).sort().join(',')
-        : ''
-      if (!r && !l) return ''
-      return `R:${r}|L:${l}`
-    }
-
-    function loadPersistedDismissedDiffs() {
+    function loadPersistedCollapsedDiffs() {
       const map = new Map()
       try {
-        const raw = typeof sessionStorage !== 'undefined'
-          ? sessionStorage.getItem(DISMISSED_DIFF_STORAGE_KEY)
+        const raw = typeof localStorage !== 'undefined'
+          ? localStorage.getItem(COLLAPSED_DIFF_STORAGE_KEY)
           : null
         if (raw) {
           const parsed = JSON.parse(raw)
           if (parsed && typeof parsed === 'object') {
             for (const [k, v] of Object.entries(parsed)) {
-              if (typeof v === 'string') map.set(k, v)
+              if (typeof v === 'boolean') map.set(k, v)
             }
           }
         }
@@ -74,10 +64,10 @@ window.__ModuleLoader__.load({
       return map
     }
 
-    function savePersistedDismissedDiffs(map) {
+    function savePersistedCollapsedDiffs(map) {
       try {
-        if (typeof sessionStorage !== 'undefined') {
-          sessionStorage.setItem(DISMISSED_DIFF_STORAGE_KEY, JSON.stringify(Object.fromEntries(map)))
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(COLLAPSED_DIFF_STORAGE_KEY, JSON.stringify(Object.fromEntries(map)))
         }
       } catch {}
     }
@@ -158,13 +148,14 @@ window.__ModuleLoader__.load({
       btnSyncWorkspace: '同步到本地',
       btnSyncingWorkspace: '正在同步…',
       btnRefreshWorkspaces: '刷新工作区',
-      wsSyncedNotice: '已将远程工作区「{title}」同步至左侧导航栏 Remote Workspaces',
+      wsSyncedNotice: '已将远程工作区「{title}」同步至左侧导航栏 Workspaces',
 
       pluginDiffTitle: '本地与远端插件差异提示',
       pluginDiffMissingOnRemote: '以下本地插件尚未安装到远端（如需在远程会话中使用其后台工具，可一键同步）：',
       pluginDiffMissingOnLocal: '远端已安装以下本地未安装的插件（后台工具会自动回退为通用卡片展示；若需其专属定制 UI 可在浏览器打开远端原生界面）：',
       btnSyncDiffPlugin: '同步 {name}',
-      btnDismissDiff: '知道了',
+      btnCollapseDiff: '收起',
+      btnExpandDiff: '展开',
 
       remoteWorkspacesSection: '远程工作区',
       sidebarConnectHost: '连接主机',
@@ -315,13 +306,14 @@ window.__ModuleLoader__.load({
       btnSyncWorkspace: 'Sync to local',
       btnSyncingWorkspace: 'Syncing…',
       btnRefreshWorkspaces: 'Refresh',
-      wsSyncedNotice: 'Synchronized remote workspace "{title}" to Remote Workspaces in the left sidebar',
+      wsSyncedNotice: 'Synchronized remote workspace "{title}" to Workspaces in the left sidebar',
 
       pluginDiffTitle: 'Local & remote plugin differences',
       pluginDiffMissingOnRemote: 'Local plugins not installed on remote (sync them if your remote sessions need their tools):',
       pluginDiffMissingOnLocal: 'Remote plugins not installed locally (backend tools still run on remote with generic card fallback; open remote native DSH if custom UI is needed):',
       btnSyncDiffPlugin: 'Sync {name}',
-      btnDismissDiff: 'Dismiss',
+      btnCollapseDiff: 'Collapse',
+      btnExpandDiff: 'Expand',
 
       remoteWorkspacesSection: 'Remote Workspaces',
       sidebarConnectHost: 'Connect host',
@@ -397,187 +389,62 @@ window.__ModuleLoader__.load({
     }
 
     const GLOBAL_SIDEBAR_CSS = `
-/* Hide remote:* workspaces from the built-in local Workspaces tree so they only appear in the dedicated Remote Workspaces section */
-[data-sidebar-list-area] [role="tree"] > div:has(> [data-row-key^="workspace:remote:"]) {
-  display: none !important;
+/* VS Code remote-explorer style circular corner badge on remote workspace folder icons */
+[data-row-key^="workspace:remote:"] > span:first-child {
+  position: relative;
 }
-[data-sidebar-list-area] [data-row-key^="workspace:remote:"] {
+[data-row-key^="workspace:remote:"] > span:first-child::before {
+  content: "";
+  position: absolute;
+  right: -2px;
+  bottom: 0.5px;
+  width: 9.5px;
+  height: 9.5px;
+  border-radius: 50%;
+  background-color: var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-base));
+  pointer-events: none;
+  z-index: 1;
+}
+[data-row-key^="workspace:remote:"]:hover > span:first-child::before {
+  background-color: var(--dsw-alias-interactive-bg-hover);
+}
+[data-row-key^="workspace:remote:"] > span:first-child::after {
+  content: "";
+  position: absolute;
+  right: -1.5px;
+  bottom: 1px;
+  width: 8.5px;
+  height: 8.5px;
+  background-color: currentColor;
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Ccircle cx='8' cy='8' r='6.75' stroke='black' stroke-width='1.45'/%3E%3Cpath d='M4.7 7.1L7.2 9.5L4.7 11.9' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M11.3 4.1L8.8 6.5L11.3 8.9' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Ccircle cx='8' cy='8' r='6.75' stroke='black' stroke-width='1.45'/%3E%3Cpath d='M4.7 7.1L7.2 9.5L4.7 11.9' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M11.3 4.1L8.8 6.5L11.3 8.9' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  -webkit-mask-size: 8.5px 8.5px;
+  mask-size: 8.5px 8.5px;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* When a remote workspace's host is disconnected, keep the folder icon visible on hover (no sessions to expand) */
+[data-row-key^="workspace:remote:"][data-rc-status="disconnected"]:hover > span:first-child,
+[data-row-key^="workspace:remote:"][data-rc-status="connecting"]:hover > span:first-child,
+[data-row-key^="workspace:remote:"][data-rc-status="error"]:hover > span:first-child {
+  display: inline-flex !important;
+}
+[data-row-key^="workspace:remote:"][data-rc-status="disconnected"]:hover > span:nth-child(2),
+[data-row-key^="workspace:remote:"][data-rc-status="connecting"]:hover > span:nth-child(2),
+[data-row-key^="workspace:remote:"][data-rc-status="error"]:hover > span:nth-child(2) {
   display: none !important;
 }
 
-/* Dedicated Remote Workspaces section in the left sidebar (above Workspaces) */
-.dsh-rc-rw-mount {
-  flex: none;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-[data-sidebar-collapsed="true"] .dsh-rc-rw-mount {
+/* Hide the built-in New Session button on disconnected remote workspaces and show the Connect Host button instead */
+[data-row-key^="workspace:remote:"]:not([data-rc-status="connected"]) > span:last-child > *:not(:first-child):not(.dsh-rc-inline-connect-btn) {
   display: none !important;
 }
-.dsh-rc-rw-section {
-  display: flex;
-  flex-direction: column;
-  margin-bottom: 6px;
-  min-width: 0;
-}
-.dsh-rc-rw-header {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 4px;
-  height: 36px;
-  padding-left: var(--dsh-sidebar-row-padding, 12px);
-  padding-right: 4px;
-  box-sizing: border-box;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: 14px;
-  line-height: 20px;
-  user-select: none;
-}
-.dsh-rc-rw-header-label {
-  position: relative;
-  left: -1px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.dsh-rc-rw-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-left: -4px;
-  margin-right: calc(2px - var(--dsh-sidebar-inline-padding, 8px));
-  padding-left: 4px;
-  padding-right: calc(var(--dsh-sidebar-inline-padding, 8px) - 2px);
-}
-.dsh-rc-rw-group {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  position: relative;
-}
-.dsh-rc-rw-project-row,
-.dsh-rc-rw-session-row {
-  display: flex;
-  align-items: center;
-  gap: var(--dsh-sidebar-label-gap, 6px);
-  height: 32px;
-  border-radius: var(--dsw-radius-md, 12px);
-  border-inline: var(--dsh-sidebar-paint-inset, 3px) solid transparent;
-  background-clip: padding-box;
-  box-sizing: border-box;
-  padding: 0 8px;
-  padding-inline-start: calc(var(--dsh-sidebar-row-padding, 12px) - var(--dsh-sidebar-paint-inset, 3px));
-  cursor: pointer;
-  user-select: none;
-  color: var(--dsw-alias-label-primary);
-  position: relative;
-}
-.dsh-rc-rw-session-row {
-  gap: 0;
-}
-.dsh-rc-rw-project-row:hover,
-.dsh-rc-rw-project-row[data-menu-open="true"],
-.dsh-rc-rw-session-row:hover,
-.dsh-rc-rw-session-row[data-selected="true"],
-.dsh-rc-rw-session-row[data-menu-open="true"] {
-  background-color: var(--dsw-alias-interactive-bg-hover);
-}
-.dsh-rc-rw-slot {
-  flex: none;
-  width: 16px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--dsw-alias-label-tertiary);
-}
-.dsh-rc-rw-slot[data-active="true"] {
-  color: var(--dsw-alias-state-business-primary);
-}
-.dsh-rc-rw-project-row .dsh-rc-rw-chevron {
-  display: none;
-  color: var(--dsw-alias-label-caption);
-}
-.dsh-rc-rw-project-row[data-connected="true"]:hover .dsh-rc-rw-chevron {
-  display: inline-flex;
-}
-.dsh-rc-rw-project-row[data-connected="true"]:hover .dsh-rc-rw-folder {
-  display: none;
-}
-.dsh-rc-rw-arrow {
-  transition: transform 150ms ease-in-out;
-}
-.dsh-rc-rw-arrow[data-open="true"] {
-  transform: rotate(90deg);
-}
-.dsh-rc-rw-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 14px;
-  line-height: 20px;
-}
-.dsh-rc-rw-session-row .dsh-rc-rw-title {
-  margin: 0 6px 0 var(--dsh-sidebar-label-gap, 6px);
-}
-.dsh-rc-rw-rename-input {
-  flex: 1;
-  min-width: 0;
-  font-size: 14px;
-  line-height: 20px;
-  padding: 0 4px;
-  border: 0.5px solid var(--dsw-alias-border-l3);
-  border-radius: var(--dsw-radius-sm, 6px);
-  background: var(--dsw-alias-bg-base);
-  color: var(--dsw-alias-label-primary);
-  outline: none;
-}
-.dsh-rc-rw-resting {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--dsw-alias-label-tertiary);
-}
-.dsh-rc-rw-time {
-  flex: none;
-  font-size: 10px;
-  line-height: 16px;
-  color: var(--dsw-alias-label-tertiary);
-}
-.dsh-rc-rw-pin {
-  display: inline-flex;
-  flex: none;
-  width: 16px;
-  height: 20px;
-  align-items: center;
-  justify-content: center;
-  color: var(--dsw-alias-label-caption);
-}
-.dsh-rc-rw-actions {
-  flex: none;
-  display: none;
-  align-items: center;
-  gap: 10px;
-  height: 20px;
-}
-.dsh-rc-rw-project-row[data-connected="false"] .dsh-rc-rw-actions,
-.dsh-rc-rw-project-row:hover .dsh-rc-rw-actions,
-.dsh-rc-rw-project-row[data-menu-open="true"] .dsh-rc-rw-actions,
-.dsh-rc-rw-session-row:hover .dsh-rc-rw-actions,
-.dsh-rc-rw-session-row[data-menu-open="true"] .dsh-rc-rw-actions {
-  display: inline-flex;
-}
-.dsh-rc-rw-session-row:hover .dsh-rc-rw-resting,
-.dsh-rc-rw-session-row[data-menu-open="true"] .dsh-rc-rw-resting {
-  display: none;
-}
-.dsh-rc-rw-icon-btn {
+.dsh-rc-inline-connect-btn {
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -585,100 +452,22 @@ window.__ModuleLoader__.load({
   width: 24px;
   height: 24px;
   margin: -4px;
+  padding: 0;
   border: none;
   border-radius: var(--dsw-radius-xs, 4px);
-  padding: 0;
   background: transparent;
+  color: var(--dsw-alias-brand-primary);
   cursor: pointer;
-  color: var(--dsw-alias-label-tertiary);
 }
-.dsh-rc-rw-icon-btn:hover {
-  color: var(--dsw-alias-label-primary);
-}
-.dsh-rc-connect-ws-btn {
-  color: var(--dsw-alias-brand-primary);
-}
-.dsh-rc-connect-ws-btn:hover:not(:disabled) {
-  color: var(--dsw-alias-brand-primary);
+.dsh-rc-inline-connect-btn:hover:not(:disabled) {
   background-color: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-brand-primary);
 }
-.dsh-rc-connect-ws-btn:disabled {
+.dsh-rc-inline-connect-btn:disabled {
   opacity: 0.55;
   cursor: default;
 }
-.dsh-rc-rw-overflow-btn {
-  width: 100%;
-  height: 28px;
-  border: none;
-  border-radius: var(--dsw-radius-sm, 6px);
-  padding: 0 var(--dsh-sidebar-row-padding, 12px) 0 calc(var(--dsh-sidebar-row-padding, 12px) + 16px + var(--dsh-sidebar-label-gap, 6px));
-  background: transparent;
-  cursor: pointer;
-  text-align: left;
-  font-size: 12px;
-  color: var(--dsw-alias-label-tertiary);
-}
-.dsh-rc-rw-overflow-btn:hover {
-  color: var(--dsw-alias-label-secondary);
-}
-.dsh-rc-rw-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  flex: none;
-  background: var(--dsw-alias-state-business-primary);
-}
-.dsh-rc-rw-status-dot[data-state="running"] {
-  background: var(--dsw-alias-state-business-primary);
-  animation: dsh-rc-pulse 1.4s ease-in-out infinite;
-}
-.dsh-rc-rw-status-dot[data-state="approval"],
-.dsh-rc-rw-status-dot[data-state="question"],
-.dsh-rc-rw-status-dot[data-state="plan-review"] {
-  background: var(--dsw-alias-state-warn-primary);
-}
-.dsh-rc-rw-status-dot[data-state="completed"] {
-  background: var(--dsw-alias-state-success-primary);
-}
-@keyframes dsh-rc-pulse {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.45; transform: scale(0.86); }
-}
-.dsh-rc-rw-menu {
-  position: fixed;
-  z-index: 9998;
-  min-width: 190px;
-  padding: 4px;
-  border-radius: 8px;
-  background: var(--dsw-alias-bg-overlay);
-  border: 1px solid var(--dsw-alias-border-l2);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.dsh-rc-rw-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 28px;
-  padding: 4px 10px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dsw-alias-label-primary);
-  font-size: 12.5px;
-  text-align: left;
-  cursor: pointer;
-  box-sizing: border-box;
-}
-.dsh-rc-rw-menu-item:hover {
-  background: var(--dsw-alias-interactive-bg-hover);
-}
-.dsh-rc-rw-menu-item[data-danger="true"] {
-  color: var(--dsw-alias-state-error-primary);
-}
+
 .dsh-rc-header-pill {
   display: inline-flex;
   align-items: center;
@@ -996,6 +785,34 @@ window.__ModuleLoader__.load({
   font-weight: 600;
   color: var(--dsw-alias-label-primary);
 }
+.dsh-rc-diff-header-left {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  cursor: pointer;
+  user-select: none;
+}
+.dsh-rc-diff-count {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-2);
+  border: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-secondary);
+}
+.dsh-rc-diff-toggle-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.dsh-rc-diff-chevron {
+  transition: transform 0.15s ease;
+}
+.dsh-rc-diff-chevron[data-collapsed="true"] {
+  transform: rotate(-90deg);
+}
 .dsh-rc-diff-section {
   display: flex;
   flex-direction: column;
@@ -1110,6 +927,39 @@ window.__ModuleLoader__.load({
 .dsh-rc-input:focus {
   outline: 1.5px solid var(--dsw-alias-brand-primary);
   border-color: var(--dsw-alias-brand-primary);
+}
+.dsh-rc-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.dsh-rc-input-wrap .dsh-rc-input {
+  width: 100%;
+}
+.dsh-rc-input-wrap[data-has-toggle="true"] .dsh-rc-input {
+  padding-right: 34px;
+}
+.dsh-rc-eye-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.dsh-rc-eye-btn:hover {
+  color: var(--dsw-alias-label-primary);
+  background: var(--dsw-alias-interactive-bg-hover);
 }
 .dsh-rc-settings-foot {
   display: flex;
@@ -1391,6 +1241,112 @@ window.__ModuleLoader__.load({
       }))
     }
 
+    function DisconnectIcon({ size = 16 }) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        'aria-hidden': 'true',
+      },
+      h('path', {
+        d: 'M5 7L3.5 8.5C2.4 9.6 2.4 11.4 3.5 12.5C4.6 13.6 6.4 13.6 7.5 12.5L9 11M11 9L12.5 7.5C13.6 6.4 13.6 4.6 12.5 3.5C11.4 2.4 9.6 2.4 8.5 3.5L7 5M2.5 2.5L13.5 13.5',
+        stroke: 'currentColor',
+        strokeWidth: 1.35,
+        strokeLinecap: 'round',
+      }))
+    }
+
+    function ExternalBrowserIcon({ size = 16 }) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        'aria-hidden': 'true',
+      },
+      h('path', {
+        d: 'M9.5 2.5H13.5V6.5M13.2 2.8L7.5 8.5M7 3.5H4C3.17 3.5 2.5 4.17 2.5 5V12C2.5 12.83 3.17 13.5 4 13.5H11C11.83 13.5 12.5 12.83 12.5 12V9',
+        stroke: 'currentColor',
+        strokeWidth: 1.35,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      }))
+    }
+
+    /**
+     * Open eye icon shown when the password/secret input is visible.
+     */
+    function EyeOpenIcon({ size = 16 }) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        'aria-hidden': 'true',
+      },
+      h('path', {
+        d: 'M1.5 8C2.9 5.25 5.25 3.5 8 3.5C10.75 3.5 13.1 5.25 14.5 8C13.1 10.75 10.75 12.5 8 12.5C5.25 12.5 2.9 10.75 1.5 8Z',
+        stroke: 'currentColor',
+        strokeWidth: 1.35,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      }),
+      h('circle', {
+        cx: 8,
+        cy: 8,
+        r: 2,
+        stroke: 'currentColor',
+        strokeWidth: 1.35,
+      }))
+    }
+
+    /**
+     * Closed eye icon shown when the password/secret input is hidden.
+     */
+    function EyeClosedIcon({ size = 16 }) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 16 16',
+        fill: 'none',
+        'aria-hidden': 'true',
+      },
+      h('path', {
+        d: 'M2 6.8C3.5 9.5 5.6 10.8 8 10.8C10.4 10.8 12.5 9.5 14 6.8',
+        stroke: 'currentColor',
+        strokeWidth: 1.35,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      }),
+      h('path', {
+        d: 'M4.6 9.5L3.4 11.6M8 10.8V13.1M11.4 9.5L12.6 11.6',
+        stroke: 'currentColor',
+        strokeWidth: 1.35,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      }))
+    }
+
+    function ChevronDownIcon({ size = 12, collapsed = false }) {
+      return h('svg', {
+        width: size,
+        height: size,
+        viewBox: '0 0 12 12',
+        fill: 'none',
+        className: 'dsh-rc-diff-chevron',
+        'data-collapsed': collapsed ? 'true' : 'false',
+        'aria-hidden': 'true',
+      },
+      h('path', {
+        d: 'M2.5 4.25L6 7.75L9.5 4.25',
+        stroke: 'currentColor',
+        strokeWidth: 1.4,
+        strokeLinecap: 'round',
+        strokeLinejoin: 'round',
+      }))
+    }
+
     function formatRelativeTime(updatedAtMs, nowMs, t) {
       if (!updatedAtMs || !Number.isFinite(updatedAtMs)) return ''
       const diffSec = Math.max(0, Math.floor((nowMs - updatedAtMs) / 1000))
@@ -1500,6 +1456,10 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dsh-rc-field-label' }, t('authPromptLabel')),
           h('div', { className: 'dsh-rc-prompt-box' }, promptInfo.prompt)),
         h('div', { className: 'dsh-rc-field' },
+          h('div', {
+            className: 'dsh-rc-input-wrap',
+            'data-has-toggle': !alwaysPlainText ? 'true' : 'false',
+          },
           h('input', {
             ref: inputRef,
             type: alwaysPlainText || showSecret ? 'text' : 'password',
@@ -1508,16 +1468,18 @@ window.__ModuleLoader__.load({
             placeholder,
             autoComplete: 'off',
             onChange: (e) => setValue(e.target.value),
-          })),
-        !alwaysPlainText && h('label', {
-          style: { display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', cursor: 'pointer', color: 'var(--dsw-alias-label-secondary)' },
-        },
-        h('input', {
-          type: 'checkbox',
-          checked: showSecret,
-          onChange: (e) => setShowSecret(e.target.checked),
-        }),
-        showSecret ? t('authHideSecret') : t('authShowSecret')),
+          }),
+          !alwaysPlainText && h('button', {
+            type: 'button',
+            className: 'dsh-rc-eye-btn',
+            title: showSecret ? t('authHideSecret') : t('authShowSecret'),
+            'aria-label': showSecret ? t('authHideSecret') : t('authShowSecret'),
+            'aria-pressed': showSecret,
+            onClick: () => {
+              setShowSecret((v) => !v)
+              inputRef.current?.focus?.()
+            },
+          }, showSecret ? h(EyeOpenIcon, { size: 16 }) : h(EyeClosedIcon, { size: 16 })))),
         h('div', { className: 'dsh-rc-modal-actions' },
           h('button', {
             type: 'button',
@@ -1906,11 +1868,9 @@ window.__ModuleLoader__.load({
       )
 
       const isZh = String(localeId || '').toLowerCase().startsWith('zh')
-      const isDiffDismissed = sharedState.isPluginDiffDismissed(item.alias, pluginDiff)
-      const hasPluginDiff = !isDiffDismissed && pluginDiff && (
-        (pluginDiff.missingOnRemote && pluginDiff.missingOnRemote.length > 0) ||
-        (pluginDiff.missingOnLocal && pluginDiff.missingOnLocal.length > 0)
-      )
+      const diffCount = (pluginDiff?.missingOnRemote?.length || 0) + (pluginDiff?.missingOnLocal?.length || 0)
+      const hasPluginDiff = Boolean(pluginDiff && diffCount > 0)
+      const isDiffCollapsed = sharedState.isPluginDiffCollapsed(item.alias)
 
       return h('li', {
         className: 'dsh-rc-card',
@@ -2053,16 +2013,28 @@ window.__ModuleLoader__.load({
         wsNotice && h('div', { className: 'dsh-rc-notice', role: 'status' }, wsNotice),
         wsError && h('div', { className: 'dsh-rc-error-inline', role: 'alert' }, wsError),
 
-        // Non-blocking plugin difference banner with persistent Dismiss state
-        hasPluginDiff && h('div', { className: 'dsh-rc-diff-box', role: 'status' },
+        // Collapsible plugin difference banner with long-term persisted collapse/expand state
+        hasPluginDiff && h('div', {
+          className: 'dsh-rc-diff-box',
+          'data-collapsed': isDiffCollapsed ? 'true' : 'false',
+          role: 'status',
+        },
           h('div', { className: 'dsh-rc-diff-header' },
+            h('span', {
+              className: 'dsh-rc-diff-header-left',
+              onClick: () => sharedState.togglePluginDiffCollapsed(item.alias),
+            },
             h('span', null, t('pluginDiffTitle')),
+            h('span', { className: 'dsh-rc-diff-count' }, String(diffCount))),
             h('button', {
               type: 'button',
-              className: 'dsh-rc-btn dsh-rc-btn-sm',
-              onClick: () => sharedState.dismissPluginDiff(item.alias, pluginDiff),
-            }, t('btnDismissDiff'))),
-          pluginDiff.missingOnRemote?.length > 0 && h('div', { className: 'dsh-rc-diff-section' },
+              className: 'dsh-rc-btn dsh-rc-btn-sm dsh-rc-diff-toggle-btn',
+              'aria-expanded': !isDiffCollapsed,
+              onClick: () => sharedState.togglePluginDiffCollapsed(item.alias),
+            },
+            h(ChevronDownIcon, { size: 12, collapsed: isDiffCollapsed }),
+            isDiffCollapsed ? t('btnExpandDiff') : t('btnCollapseDiff'))),
+          !isDiffCollapsed && pluginDiff.missingOnRemote?.length > 0 && h('div', { className: 'dsh-rc-diff-section' },
             h('span', null, t('pluginDiffMissingOnRemote')),
             h('div', { className: 'dsh-rc-diff-tags' },
               pluginDiff.missingOnRemote.map((mp) => {
@@ -2075,7 +2047,7 @@ window.__ModuleLoader__.load({
                   onClick: () => triggerSyncPlugin(mp.name),
                 }, t('btnSyncDiffPlugin', { name: `${pTitle} (v${mp.version})` }))
               }))),
-          pluginDiff.missingOnLocal?.length > 0 && h('div', { className: 'dsh-rc-diff-section' },
+          !isDiffCollapsed && pluginDiff.missingOnLocal?.length > 0 && h('div', { className: 'dsh-rc-diff-section' },
             h('span', null, t('pluginDiffMissingOnLocal')),
             h('div', { className: 'dsh-rc-diff-tags' },
               pluginDiff.missingOnLocal.map((rp) => {
@@ -2274,6 +2246,10 @@ window.__ModuleLoader__.load({
           const model = getClientWorkspaceModel()
           if (!model || !localWorkspaceId || !sessionId) return
           try {
+            const parsed = parseLocalWorkspaceId(localWorkspaceId)
+            if (parsed) {
+              sessionToRemoteHost.set(sessionId, parsed.host)
+            }
             model.removedIds?.delete?.(localWorkspaceId)
             const snap = model.getSnapshot?.()
             const existing = snap?.items?.find((w) => w.workspaceId === localWorkspaceId)
@@ -2293,6 +2269,7 @@ window.__ModuleLoader__.load({
               createdAt: existing?.createdAt || rec?.createdAt || new Date().toISOString(),
               updatedAt: new Date(nextMs).toISOString(),
             })
+            reconcileAllModelDirectories()
           } catch {}
         }
 
@@ -2310,6 +2287,18 @@ window.__ModuleLoader__.load({
               model.removedIds?.delete?.(ws.localWorkspaceId)
               const existing = existingById.get(ws.localWorkspaceId)
               const wsSessionIds = Array.isArray(ws.sessionIds) ? ws.sessionIds : []
+              for (const sid of wsSessionIds) {
+                if (typeof sid === 'string' && sid) {
+                  sessionToRemoteHost.set(sid, ws.host)
+                }
+              }
+              if (Array.isArray(ws.rawSummaries)) {
+                for (const s of ws.rawSummaries) {
+                  if (s && typeof s.sessionId === 'string') {
+                    sessionToRemoteHost.set(s.sessionId, ws.host)
+                  }
+                }
+              }
               const sameSessions = existing &&
                 Array.isArray(existing.sessionIds) &&
                 existing.sessionIds.length === wsSessionIds.length &&
@@ -2355,6 +2344,7 @@ window.__ModuleLoader__.load({
               if (Array.isArray(ws.rawSummaries)) {
                 for (const summary of ws.rawSummaries) {
                   if (summary && typeof summary.sessionId === 'string') {
+                    sessionToRemoteHost.set(summary.sessionId, ws.host)
                     rawSessions.handleSessionAdded(summary)
                   }
                 }
@@ -2362,6 +2352,7 @@ window.__ModuleLoader__.load({
               const sids = Array.isArray(ws.sessionIds) ? ws.sessionIds : []
               for (const sid of sids) {
                 if (!sid || typeof sid !== 'string') continue
+                sessionToRemoteHost.set(sid, ws.host)
                 if (!byId[sid]) {
                   rawSessions.handleSessionAdded({
                     sessionId: sid,
@@ -2389,6 +2380,322 @@ window.__ModuleLoader__.load({
           } catch {}
         }
 
+        /**
+         * Per-remote-host ModelCatalogDirectory implementation that mirrors DSH's
+         * `ModelCatalogDirectory` interface (`store`, `load()`, `reasoningFor()`, `refresh()`, `resetGeneration()`),
+         * fetching the remote host's `session/modelCatalog` so remote sessions only display models
+         * configured on the remote host.
+         */
+        function createSimpleCatalogStore(initialState) {
+          let state = initialState
+          const listeners = new Set()
+          const notify = () => {
+            for (const fn of [...listeners]) {
+              try { fn() } catch {}
+            }
+          }
+          return {
+            getSnapshot() {
+              return state
+            },
+            subscribe(fn) {
+              listeners.add(fn)
+              return () => listeners.delete(fn)
+            },
+            set(next) {
+              state = next
+              notify()
+            },
+            update(mutator) {
+              const draft = { ...state }
+              mutator(draft)
+              state = draft
+              notify()
+            },
+          }
+        }
+
+        class RemoteModelCatalogDirectory {
+          constructor(host) {
+            this.host = host
+            this.store = createSimpleCatalogStore({
+              value: null,
+              status: 'idle',
+              error: null,
+            })
+            this.reasoning = new Map()
+            this.generation = 0
+            this.inflight = undefined
+            this.lastLoadedAt = 0
+          }
+
+          reasoningFor(selection) {
+            if (!selection) return undefined
+            return this.reasoning.get(JSON.stringify([selection.provider, selection.model]))
+          }
+
+          _normalizeRemoteCatalog(rawCatalog) {
+            if (!rawCatalog || typeof rawCatalog !== 'object') {
+              return { default: { provider: '', model: '' }, routableProviders: [], groups: [], failures: [] }
+            }
+            const groups = Array.isArray(rawCatalog.groups) ? rawCatalog.groups : []
+            const failures = Array.isArray(rawCatalog.failures) ? rawCatalog.failures : []
+            const routableProviders = Array.isArray(rawCatalog.routableProviders) ? rawCatalog.routableProviders : []
+            let def = rawCatalog.default
+            const defIsRoutable = Boolean(
+              def?.provider &&
+              def?.model &&
+              groups.some((g) => g.id === def.provider && Array.isArray(g.models) && g.models.some((m) => m.id === def.model)),
+            )
+            if (!defIsRoutable) {
+              const firstGroup = groups.find((g) => Array.isArray(g.models) && g.models.length > 0)
+              const firstModel = firstGroup?.models?.[0]
+              if (firstGroup && firstModel) {
+                def = {
+                  provider: firstGroup.id,
+                  model: firstModel.id,
+                  ...(firstModel.reasoning?.defaultEffort !== undefined
+                    ? { reasoningEffort: firstModel.reasoning.defaultEffort }
+                    : {}),
+                }
+              }
+            }
+            return {
+              ...rawCatalog,
+              default: def || { provider: '', model: '' },
+              routableProviders,
+              groups,
+              failures,
+            }
+          }
+
+          load() {
+            const state = this.store.getSnapshot()
+            const now = Date.now()
+            if (state.status === 'ready' && state.value !== null) {
+              if (now - this.lastLoadedAt > 4_000 && !this.inflight) {
+                void this._fetchRemoteCatalog(this.generation, true).catch(() => {})
+              }
+              return Promise.resolve(state.value)
+            }
+            if (this.inflight !== undefined) return this.inflight
+            return this._fetchRemoteCatalog(this.generation, false)
+          }
+
+          _fetchRemoteCatalog(generation, background = false) {
+            if (!background) {
+              this.store.update((draft) => {
+                draft.status = 'loading'
+                draft.error = null
+              })
+            }
+            const operation = callHost('model-catalog', { host: this.host })
+              .then((res) => {
+                const catalog = this._normalizeRemoteCatalog(res?.catalog)
+                if (generation === this.generation) {
+                  for (const group of catalog.groups) {
+                    for (const model of group.models ?? []) {
+                      this.reasoning.set(JSON.stringify([group.id, model.id]), model.reasoning)
+                    }
+                  }
+                  this.lastLoadedAt = Date.now()
+                  this.store.set({ value: catalog, status: 'ready', error: null })
+                }
+                return catalog
+              })
+              .catch((error) => {
+                if (generation === this.generation && !background) {
+                  this.store.update((draft) => {
+                    draft.status = 'error'
+                    draft.error = error instanceof Error ? error.message : String(error)
+                  })
+                }
+                throw error
+              })
+              .finally(() => {
+                if (generation === this.generation && this.inflight === operation) {
+                  this.inflight = undefined
+                }
+              })
+            this.inflight = operation
+            return operation
+          }
+
+          invalidate(clear = false) {
+            this.generation += 1
+            this.inflight = undefined
+            const value = clear ? null : this.store.getSnapshot().value
+            this.store.set({ value, status: 'idle', error: null })
+          }
+
+          refresh() {
+            this.invalidate()
+            void this.load().catch(() => {})
+          }
+
+          resetGeneration() {
+            this.reasoning.clear()
+            this.invalidate(true)
+            void this.load().catch(() => {})
+          }
+        }
+
+        const remoteCatalogsByHost = new Map()
+        const sessionToRemoteHost = new Map()
+        const checkedRemoteHostSessionIds = new Set()
+        const trackedModelDirectories = new Set()
+
+        function getRemoteHostCatalog(host) {
+          let cat = remoteCatalogsByHost.get(host)
+          if (!cat) {
+            cat = new RemoteModelCatalogDirectory(host)
+            remoteCatalogsByHost.set(host, cat)
+          }
+          return cat
+        }
+
+        function resolveRemoteHostForSession(sessionId) {
+          if (!sessionId || typeof sessionId !== 'string') return null
+          const direct = sessionToRemoteHost.get(sessionId)
+          if (direct) return direct
+
+          // Check client workspace model
+          try {
+            const wsModel = getClientWorkspaceModel()
+            const snap = wsModel?.getSnapshot?.()
+            for (const w of snap?.items ?? []) {
+              const parsed = parseLocalWorkspaceId(w?.workspaceId)
+              if (parsed && Array.isArray(w.sessionIds) && w.sessionIds.includes(sessionId)) {
+                sessionToRemoteHost.set(sessionId, parsed.host)
+                return parsed.host
+              }
+            }
+          } catch {}
+
+          // Check sharedState syncedWorkspaces
+          for (const ws of sharedState.syncedWorkspaces) {
+            if (!ws || !ws.host) continue
+            if (
+              (Array.isArray(ws.sessionIds) && ws.sessionIds.includes(sessionId)) ||
+              (Array.isArray(ws.rawSummaries) && ws.rawSummaries.some((s) => s?.sessionId === sessionId))
+            ) {
+              sessionToRemoteHost.set(sessionId, ws.host)
+              return ws.host
+            }
+          }
+          return null
+        }
+
+        function bindDirectoryToCatalog(directory, targetCatalog, hostTag) {
+          if (!directory || directory.disposed || !targetCatalog) return
+          if (directory._rcBoundCatalog === targetCatalog) return
+          directory._rcBoundCatalog = targetCatalog
+          directory._rcBoundHost = hostTag || null
+          try {
+            if (typeof directory.unsubscribeCatalog === 'function') {
+              directory.unsubscribeCatalog()
+            }
+          } catch {}
+          directory.catalog = targetCatalog
+          directory.unsubscribeCatalog = targetCatalog.store.subscribe(() => {
+            try {
+              directory.syncInputs()
+              // If this is a remote session whose current model is not routable on the remote host
+              // while the remote catalog has a valid default model, auto-align blank sessions to the remote default
+              if (hostTag && typeof directory.isBlank === 'function' && directory.isBlank()) {
+                const dirSnap = directory.store?.getSnapshot?.()
+                const catSnap = targetCatalog.store?.getSnapshot?.()
+                const remoteDef = catSnap?.value?.default
+                if (
+                  catSnap?.status === 'ready' &&
+                  dirSnap?.routable === false &&
+                  dirSnap?.status === 'ready' &&
+                  remoteDef?.provider &&
+                  remoteDef?.model &&
+                  !directory._rcAutoAlignedDefault
+                ) {
+                  directory._rcAutoAlignedDefault = true
+                  void directory.select(remoteDef).catch(() => {})
+                }
+              }
+            } catch {}
+          })
+          try {
+            directory.syncInputs()
+          } catch {}
+          void targetCatalog.load().catch(() => {})
+        }
+
+        function reconcileDirectoryCatalog(directory) {
+          if (!directory || directory.disposed) {
+            trackedModelDirectories.delete(directory)
+            return
+          }
+          if (!directory._rcOriginalLocalCatalog) {
+            directory._rcOriginalLocalCatalog = directory.catalog
+          }
+          const sid = directory.sessionId
+          const host = resolveRemoteHostForSession(sid)
+          if (host) {
+            const remoteCat = getRemoteHostCatalog(host)
+            bindDirectoryToCatalog(directory, remoteCat, host)
+            return
+          }
+          bindDirectoryToCatalog(directory, directory._rcOriginalLocalCatalog, null)
+          if (sid && !checkedRemoteHostSessionIds.has(sid)) {
+            checkedRemoteHostSessionIds.add(sid)
+            callHost('session-host', { sessionId: sid })
+              .then((res) => {
+                if (res?.host && typeof res.host === 'string') {
+                  sessionToRemoteHost.set(sid, res.host)
+                  reconcileDirectoryCatalog(directory)
+                }
+              })
+              .catch(() => {})
+          }
+        }
+
+        function reconcileAllModelDirectories() {
+          try {
+            const mdSvc = unwrapCordisService(ctx.get?.('modelDirectories'))
+            const liveValues = mdSvc?.live?.directories?.values
+            if (liveValues && typeof liveValues[Symbol.iterator] === 'function') {
+              for (const dir of liveValues) {
+                trackedModelDirectories.add(dir)
+              }
+            }
+          } catch {}
+          for (const dir of [...trackedModelDirectories]) {
+            if (!dir || dir.disposed) {
+              trackedModelDirectories.delete(dir)
+              continue
+            }
+            reconcileDirectoryCatalog(dir)
+          }
+        }
+
+        function installModelDirectoriesInterceptor() {
+          try {
+            const mdProxy = ctx.get?.('modelDirectories')
+            const md = unwrapCordisService(mdProxy)
+            if (!md || typeof md.directoryFor !== 'function' || md._rcDirectoryForWrapped) return
+            const origDirectoryFor = md.directoryFor.bind(md)
+            md.directoryFor = (sessionId) => {
+              const directory = origDirectoryFor(sessionId)
+              if (directory && !directory.disposed) {
+                if (!directory._rcOriginalLocalCatalog) {
+                  directory._rcOriginalLocalCatalog = directory.catalog
+                }
+                trackedModelDirectories.add(directory)
+                reconcileDirectoryCatalog(directory)
+              }
+              return directory
+            }
+            md._rcDirectoryForWrapped = true
+            reconcileAllModelDirectories()
+          } catch {}
+        }
+
         // Shared reactive store across sidebar and SSH Connect panel
         const sharedState = {
           hostsByAlias: new Map(),
@@ -2397,8 +2704,7 @@ window.__ModuleLoader__.load({
           authPrompts: [],
           remoteWorkspacesByHost: new Map(),
           pluginDiffByHost: new Map(),
-          dismissedPluginDiffs: loadPersistedDismissedDiffs(),
-          expandedRemoteWorkspaces: new Map(),
+          collapsedPluginDiffs: loadPersistedCollapsedDiffs(),
           listeners: new Set(),
           notify() {
             for (const fn of [...this.listeners]) {
@@ -2409,25 +2715,29 @@ window.__ModuleLoader__.load({
             this.listeners.add(fn)
             return () => this.listeners.delete(fn)
           },
-          isPluginDiffDismissed(host, diff) {
-            const key = computePluginDiffKey(diff)
-            if (!key) return true
-            const stored = this.dismissedPluginDiffs.get(host)
-            return stored === key || stored === '*'
+          isPluginDiffCollapsed(host) {
+            if (this.collapsedPluginDiffs.has(host)) {
+              return Boolean(this.collapsedPluginDiffs.get(host))
+            }
+            const hostItem = this.hostsByAlias.get(host)
+            if (typeof hostItem?.config?.pluginDiffCollapsed === 'boolean') {
+              return hostItem.config.pluginDiffCollapsed
+            }
+            return false
           },
-          dismissPluginDiff(host, diff) {
-            const key = computePluginDiffKey(diff) || '*'
-            this.dismissedPluginDiffs.set(host, key)
-            savePersistedDismissedDiffs(this.dismissedPluginDiffs)
+          togglePluginDiffCollapsed(host) {
+            const next = !this.isPluginDiffCollapsed(host)
+            this.collapsedPluginDiffs.set(host, next)
+            savePersistedCollapsedDiffs(this.collapsedPluginDiffs)
+            const hostItem = this.hostsByAlias.get(host)
+            if (hostItem?.config) {
+              hostItem.config.pluginDiffCollapsed = next
+            }
             this.notify()
-          },
-          isWorkspaceExpanded(localWorkspaceId) {
-            if (!this.expandedRemoteWorkspaces.has(localWorkspaceId)) return true
-            return Boolean(this.expandedRemoteWorkspaces.get(localWorkspaceId))
-          },
-          setWorkspaceExpanded(localWorkspaceId, expanded) {
-            this.expandedRemoteWorkspaces.set(localWorkspaceId, Boolean(expanded))
-            this.notify()
+            void callHost('configure', {
+              host,
+              config: { pluginDiffCollapsed: next },
+            }).catch(() => {})
           },
           updateFromList(res) {
             if (!res || typeof res !== 'object') return
@@ -2437,12 +2747,24 @@ window.__ModuleLoader__.load({
             this.hostsByAlias.clear()
             const prompts = []
             let newlyConnected = false
+            let collapsedChanged = false
             for (const hItem of res.hosts ?? []) {
               this.hostsByAlias.set(hItem.alias, hItem)
               if (hItem.authPrompt) prompts.push(hItem.authPrompt)
+              if (
+                typeof hItem.config?.pluginDiffCollapsed === 'boolean' &&
+                !this.collapsedPluginDiffs.has(hItem.alias)
+              ) {
+                this.collapsedPluginDiffs.set(hItem.alias, hItem.config.pluginDiffCollapsed)
+                collapsedChanged = true
+              }
               if (hItem.status === 'connected' && !prevConnectedHosts.has(hItem.alias)) {
                 newlyConnected = true
+                getRemoteHostCatalog(hItem.alias).refresh()
               }
+            }
+            if (collapsedChanged) {
+              savePersistedCollapsedDiffs(this.collapsedPluginDiffs)
             }
             this.authPrompts = prompts
             this.syncedWorkspaces = Array.isArray(res.syncedWorkspaces)
@@ -2454,6 +2776,8 @@ window.__ModuleLoader__.load({
 
             syncAllWorkspacesToClientModel(this.syncedWorkspaces)
             ensureSessionsInClientStore(this.syncedWorkspaces)
+            installModelDirectoriesInterceptor()
+            reconcileAllModelDirectories()
             if (newlyConnected) {
               try {
                 const sessSvc = ctx.get?.('sessions')
@@ -2486,6 +2810,14 @@ window.__ModuleLoader__.load({
           } catch {}
         }
 
+        // Intercept modelDirectories.directoryFor so remote sessions use their remote host's model catalog
+        ctx.effect(() => {
+          installModelDirectoriesInterceptor()
+          const timer = setInterval(installModelDirectoriesInterceptor, 1000)
+          timer?.unref?.()
+          return () => clearInterval(timer)
+        }, 'remote-ssh-connect: modelDirectories intercept')
+
         // Intercept uiWorkspace.startSession, openWorkspace, and connectWorkspace on the underlying service instance
         ctx.effect(() => {
           const uiWsProxy = ctx.get?.('uiWorkspace')
@@ -2505,7 +2837,6 @@ window.__ModuleLoader__.load({
                 return
               }
               ensureWorkspaceInClientModel(workspaceId)
-              sharedState.setWorkspaceExpanded(workspaceId, true)
             }
             return origStartSession(workspaceId, options)
           }
@@ -2520,7 +2851,6 @@ window.__ModuleLoader__.load({
                   return
                 }
                 ensureWorkspaceInClientModel(workspaceId)
-                sharedState.setWorkspaceExpanded(workspaceId, true)
               }
               return origOpenWorkspace(workspaceId, beforeOpen, options)
             }
@@ -2547,626 +2877,148 @@ window.__ModuleLoader__.load({
           }
         }, 'remote-ssh-connect: uiWorkspace intercept')
 
-        /**
-         * Ensure the DOM mount node `#dsh-rc-remote-workspaces-mount` exists right above `[data-slot="sidebar.workspaces"]`
-         * inside the left sidebar `.regionArea`.
-         */
-        function ensureSidebarMountNode() {
-          if (typeof document === 'undefined') return null
-          const wsSlot = document.querySelector('[data-slot="sidebar.workspaces"]')
-          if (!wsSlot || !wsSlot.parentElement) return null
-          const regionArea = wsSlot.parentElement
-          let mount = regionArea.querySelector('#dsh-rc-remote-workspaces-mount')
-          if (!mount) {
-            mount = document.createElement('div')
-            mount.id = 'dsh-rc-remote-workspaces-mount'
-            mount.className = 'dsh-rc-rw-mount'
-            regionArea.insertBefore(mount, wsSlot)
-          } else if (mount.nextElementSibling !== wsSlot) {
-            regionArea.insertBefore(mount, wsSlot)
-          }
-          return mount
-        }
+        // Register remote workspace actions into the built-in workspace context menu (Connect / Disconnect / Open remote native DSH)
+        ctx.effect(() => {
+          ctx.slots.inject('contextMenu.icon', function* () {
+            yield ctx.slots.register({ name: 'contextMenu.icon', key: 'remote-ssh-connect.connect' }, ConnectLinkIcon)
+            yield ctx.slots.register({ name: 'contextMenu.icon', key: 'remote-ssh-connect.disconnect' }, DisconnectIcon)
+            yield ctx.slots.register({ name: 'contextMenu.icon', key: 'remote-ssh-connect.open-native' }, ExternalBrowserIcon)
+          })
+        }, 'remote-ssh-connect: contextMenu icons')
 
-        /**
-         * Dedicated "Remote Workspaces" ("远程工作区") section rendered in the left sidebar right above "Workspaces".
-         * - Separated from local Workspaces, so folder icons use standard folder glyphs (no globe badge).
-         * - When a remote host is disconnected, hides sessions under its workspaces and replaces the New Session button with "连接主机" (Connect host).
-         * - When connected, displays all sessions under each remote workspace and supports New Session, Rename, Pin, Fork, Archive, and Disconnect.
-         */
-        function RemoteWorkspacesSidebarSection({
-          useWorkspaces,
-          useSessions,
-          useSessionStatus,
-          usePanelInfo,
-        }) {
-          const [, setTick] = React.useState(0)
-          const [openMenu, setOpenMenu] = React.useState(null) // { kind: 'workspace'|'session', id, x, y, ws, session }
-          const [renamingTarget, setRenamingTarget] = React.useState(null) // { kind: 'workspace'|'session', id, value }
-          const [expandedWatermarks, setExpandedWatermarks] = React.useState({})
-          const renameInputRef = React.useRef(null)
-
-          React.useEffect(() => sharedState.subscribe(() => setTick((n) => n + 1)), [])
-
-          React.useEffect(() => {
-            if (!openMenu) return undefined
-            const close = () => setOpenMenu(null)
-            const onKeyDown = (e) => { if (e.key === 'Escape') close() }
-            window.addEventListener('click', close)
-            window.addEventListener('keydown', onKeyDown)
-            return () => {
-              window.removeEventListener('click', close)
-              window.removeEventListener('keydown', onKeyDown)
-            }
-          }, [openMenu])
-
-          React.useEffect(() => {
-            if (renamingTarget && renameInputRef.current) {
-              renameInputRef.current.focus()
-              renameInputRef.current.select?.()
-            }
-          }, [renamingTarget?.id])
-
-          const wsSnapshot = typeof useWorkspaces === 'function'
-            ? useWorkspaces((s) => s)
-            : (ctx.get?.('workspaces')?.list?.getSnapshot?.() ?? { items: [], archivedSessionIds: [], pinnedSessionIds: [] })
-          const sessionsSnapshot = typeof useSessions === 'function'
-            ? useSessions((s) => s)
-            : (ctx.get?.('sessions')?.list?.getSnapshot?.() ?? { ids: [], byId: {} })
-          const statusSnapshot = typeof useSessionStatus === 'function'
-            ? useSessionStatus((s) => s)
-            : null
-          const panelActive = typeof usePanelInfo === 'function'
-            ? usePanelInfo((info) => info.activePanelId !== null)
-            : false
-
-          const syncedList = sharedState.syncedWorkspaces
-          if (!Array.isArray(syncedList) || syncedList.length === 0) {
-            return null
-          }
-
-          // Check if sidebar is in wide mode (hide section when sidebar is collapsed into icon rail)
-          const isWide = typeof document === 'undefined' ||
-            document.querySelector('[data-sidebar-collapsed="true"]') === null
-
-          if (!isWide) return null
-
-          const currentSessionId = panelActive
-            ? undefined
-            : Object.values(sessionsSnapshot?.byId ?? {}).find((s) => (s?.retainedBy?.mainView ?? 0) > 0)?.id
-
-          const archivedSet = new Set(wsSnapshot?.archivedSessionIds ?? [])
-          const pinnedSet = new Set(wsSnapshot?.pinnedSessionIds ?? [])
-          const wsItemsById = new Map((wsSnapshot?.items ?? []).map((w) => [w.workspaceId, w]))
-          const nowMs = Date.now()
-
-          const handleStartNewSession = (localWorkspaceId) => {
-            ensureWorkspaceInClientModel(localWorkspaceId)
-            sharedState.setWorkspaceExpanded(localWorkspaceId, true)
-            const uiWs = ctx.get?.('uiWorkspace')
-            if (uiWs && typeof uiWs.startSession === 'function') {
-              uiWs.startSession(localWorkspaceId)
-            }
-          }
-
-          const handleOpenSession = (sessionId, localWorkspaceId) => {
-            if (localWorkspaceId) ensureWorkspaceInClientModel(localWorkspaceId)
-            const uiWs = ctx.get?.('uiWorkspace')
-            if (uiWs && typeof uiWs.openSession === 'function') {
-              uiWs.openSession(sessionId)
-            }
-          }
-
-          const commitRename = async () => {
-            if (!renamingTarget) return
-            const target = renamingTarget
-            setRenamingTarget(null)
-            const trimmed = String(target.value || '').trim()
-            if (!trimmed) return
-            try {
-              if (target.kind === 'workspace') {
-                await ctx.get?.('workspaces')?.rename?.(target.id, trimmed)
-                await refreshSharedState()
-              } else if (target.kind === 'session') {
-                const sessSvc = ctx.get?.('sessions')
-                if (sessSvc && typeof sessSvc.using === 'function') {
-                  await sessSvc.using(target.id, { source: 'workspaceOperation' }, (ref) => ref.binding.session.rename(trimmed))
-                }
-              }
-            } catch {}
-          }
-
-          const handleRemoveWorkspace = async (localWorkspaceId) => {
-            try {
-              await callHost('remove-workspace', { localWorkspaceId })
-              await refreshSharedState()
-            } catch {}
-          }
-
-          return h('div', {
-            className: 'dsh-rc-rw-section',
-            'data-dsh-remote-workspaces-section': '',
-          },
-          h('div', { className: 'dsh-rc-rw-header' },
-            h('span', { className: 'dsh-rc-rw-header-label' }, t('remoteWorkspacesSection'))),
-
-          h('div', { className: 'dsh-rc-rw-list', role: 'tree', 'aria-label': t('remoteWorkspacesSection') },
-            syncedList.map((ws) => {
-              const localId = ws.localWorkspaceId
-              const hostInfo = sharedState.hostsByAlias.get(ws.host)
-              const status = hostInfo?.status || ws.hostStatus || 'disconnected'
-              const isConnected = status === 'connected'
-              const isConnecting = status === 'connecting'
-              const expanded = isConnected && sharedState.isWorkspaceExpanded(localId)
-              const modelWs = wsItemsById.get(localId)
-              const displayTitle = modelWs?.title || ws.title
-
-              // Resolve visible sessions when connected
-              const rawSessionIds = isConnected
-                ? (Array.isArray(modelWs?.sessionIds) && modelWs.sessionIds.length > 0
-                  ? modelWs.sessionIds
-                  : (Array.isArray(ws.sessionIds) ? ws.sessionIds : []))
-                : []
-
-              const containsCurrent = isConnected && currentSessionId !== undefined && rawSessionIds.includes(currentSessionId)
-
-              const sessionNodes = []
-              if (isConnected) {
-                const rawSummariesById = new Map(
-                  (Array.isArray(ws.rawSummaries) ? ws.rawSummaries : []).map((s) => [s.sessionId, s]),
-                )
-                const members = []
-                for (const sid of rawSessionIds) {
-                  const summary = sessionsSnapshot?.byId?.[sid]
-                  const rawSummary = rawSummariesById.get(sid)
-                  const projValues = summary?.projectionValues ??
-                    sessionsSnapshot?.projectionsBySession?.[sid]?.values ??
-                    rawSummary?.projections?.values
-                  const origin = summary?.origin ?? rawSummary?.origin
-                  if (origin === 'subagent') continue
-                  if (archivedSet.has(sid)) continue
-
-                  const metadataBlank = projValues?.sessionListMetadata?.blank
-                  const isBlank = metadataBlank !== undefined
-                    ? Boolean(metadataBlank)
-                    : Boolean(summary ? summary.blank : (rawSummary ? rawSummary.blank : true))
-                  if (isBlank && sid !== currentSessionId) continue
-
-                  const title = isBlank
-                    ? ''
-                    : String(summary?.title || projValues?.title || rawSummary?.title || '').trim()
-                  const updatedAt = Math.max(
-                    summary?.updatedAt ?? 0,
-                    rawSummary?.updatedAt ?? 0,
-                    projValues?.sessionListMetadata?.lastPromptAt ?? 0,
-                  )
-                  members.push({
-                    id: sid,
-                    title,
-                    blank: isBlank,
-                    running: Boolean(summary?.running ?? rawSummary?.running),
-                    updatedAt,
-                  })
-                }
-                // Sort: blank current first, then pinned, then by updatedAt descending
-                members.sort((a, b) => {
-                  if (a.blank !== b.blank) return a.blank ? -1 : 1
-                  const aPin = pinnedSet.has(a.id)
-                  const bPin = pinnedSet.has(b.id)
-                  if (aPin !== bPin) return aPin ? -1 : 1
-                  return (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
-                })
-                for (const s of members) {
-                  const st = statusSnapshot?.get?.(s.id)
-                  const pendingKind = st?.pendingInteraction?.kind
-                  const running = st?.running ?? s.running
-                  const completed = st?.completionUnread === true
-                  let dotState = 'idle'
-                  if (pendingKind === 'approval' || pendingKind === 'question' || pendingKind === 'plan-review') {
-                    dotState = pendingKind
-                  } else if (running) {
-                    dotState = 'running'
-                  } else if (completed) {
-                    dotState = 'completed'
-                  }
-                  sessionNodes.push({
-                    id: s.id,
-                    title: s.blank ? '' : (s.title || ''),
-                    blank: Boolean(s.blank),
-                    running: Boolean(running),
-                    dotState,
-                    pinned: pinnedSet.has(s.id),
-                    updatedAt: s.updatedAt,
-                  })
-                }
-              }
-
-              const watermark = expandedWatermarks[localId] ?? 5
-              const visibleSessions = []
-              let nonBlankCount = 0
-              for (const node of sessionNodes) {
-                if (node.blank || node.id === currentSessionId) {
-                  visibleSessions.push(node)
-                } else {
-                  nonBlankCount += 1
-                  if (nonBlankCount <= watermark) visibleSessions.push(node)
-                }
-              }
-              const hiddenSessionCount = Math.max(0, sessionNodes.length - visibleSessions.length)
-              const isRenamingThisWs = renamingTarget?.kind === 'workspace' && renamingTarget.id === localId
-              const isWsMenuOpen = openMenu?.kind === 'workspace' && openMenu.id === localId
-
-              return h('div', {
-                key: localId,
-                className: 'dsh-rc-rw-group',
-                'data-remote-workspace-group': localId,
-                'data-remote-host': ws.host,
-                'data-remote-status': status,
-              },
-              // Workspace Header Row
-              h('div', {
-                className: 'dsh-rc-rw-project-row',
-                role: 'treeitem',
-                'aria-expanded': expanded,
-                'data-connected': isConnected ? 'true' : 'false',
-                'data-menu-open': isWsMenuOpen ? 'true' : 'false',
-                title: `${ws.host}:${ws.remotePath}`,
-                onClick: () => {
-                  if (isRenamingThisWs) return
-                  if (!isConnected) return
-                  sharedState.setWorkspaceExpanded(localId, !expanded)
-                },
-                onContextMenu: (e) => {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  setOpenMenu({
-                    kind: 'workspace',
-                    id: localId,
-                    x: e.clientX,
-                    y: e.clientY,
-                    ws,
-                    displayTitle,
-                    isConnected,
-                    hostInfo,
-                  })
-                },
-              },
-              h('span', {
-                className: 'dsh-rc-rw-slot',
-                'data-active': containsCurrent ? 'true' : 'false',
-              },
-              h('span', { className: 'dsh-rc-rw-folder' },
-                expanded ? h(FolderOpenIcon, { size: 16 }) : h(FolderCloseIcon, { size: 16 })),
-              isConnected && h('span', { className: 'dsh-rc-rw-chevron' },
-                h(TriangleRightIcon, { size: 14, open: expanded }))),
-
-              isRenamingThisWs
-                ? h('input', {
-                  ref: renameInputRef,
-                  type: 'text',
-                  className: 'dsh-rc-rw-rename-input',
-                  value: renamingTarget.value,
-                  onClick: (e) => e.stopPropagation(),
-                  onChange: (e) => setRenamingTarget({ ...renamingTarget, value: e.target.value }),
-                  onBlur: () => { void commitRename() },
-                  onKeyDown: (e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      void commitRename()
-                    } else if (e.key === 'Escape') {
-                      e.preventDefault()
-                      setRenamingTarget(null)
-                    }
+        ctx.effect(() => {
+          const contextMenus = ctx.get?.('contextMenus')
+          if (!contextMenus || typeof contextMenus.register !== 'function') return () => {}
+          return contextMenus.register({
+            id: 'remote-ssh-connect.workspace-actions',
+            target: 'workspace',
+            order: 10,
+            resolve: ({ workspaceId }) => {
+              const parsed = parseLocalWorkspaceId(workspaceId)
+              if (!parsed) return []
+              const hostInfo = sharedState.hostsByAlias.get(parsed.host)
+              const isConnected = hostInfo?.status === 'connected'
+              const items = []
+              if (!isConnected) {
+                items.push({
+                  id: 'remote-ssh-connect.connect',
+                  label: t('menuConnectHost', { host: parsed.host }),
+                  icon: { key: 'remote-ssh-connect.connect' },
+                  run: () => {
+                    void connectHostFromSidebar(parsed.host)
                   },
                 })
-                : h('span', {
-                  className: 'dsh-rc-rw-title',
-                  onDoubleClick: (e) => {
-                    e.stopPropagation()
-                    setRenamingTarget({ kind: 'workspace', id: localId, value: displayTitle })
-                  },
-                }, displayTitle),
-
-              h('span', {
-                className: 'dsh-rc-rw-actions',
-                onClick: (e) => e.stopPropagation(),
-              },
-              h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-icon-btn',
-                title: t('sidebarWorkspaceActionsTooltip', { name: displayTitle }),
-                'aria-label': t('sidebarWorkspaceActionsTooltip', { name: displayTitle }),
-                onClick: (e) => {
-                  e.stopPropagation()
-                  const rect = e.currentTarget.getBoundingClientRect()
-                  setOpenMenu({
-                    kind: 'workspace',
-                    id: localId,
-                    x: rect.left,
-                    y: rect.bottom + 4,
-                    ws,
-                    displayTitle,
-                    isConnected,
-                    hostInfo,
-                  })
-                },
-              }, h(MoreHorizontalIcon, { size: 16 })),
-
-              isConnected
-                ? h('button', {
-                  type: 'button',
-                  className: 'dsh-rc-rw-icon-btn',
-                  title: t('sidebarNewSessionTooltip', { name: displayTitle }),
-                  'aria-label': t('sidebarNewSessionTooltip', { name: displayTitle }),
-                  onClick: (e) => {
-                    e.stopPropagation()
-                    handleStartNewSession(localId)
-                  },
-                }, h(NewChatIcon, { size: 14 }))
-                : h('button', {
-                  type: 'button',
-                  className: 'dsh-rc-rw-icon-btn dsh-rc-connect-ws-btn',
-                  disabled: isConnecting,
-                  title: isConnecting
-                    ? t('sidebarConnectingHost')
-                    : `${t('sidebarConnectHost')} (${ws.host})`,
-                  'aria-label': isConnecting
-                    ? t('sidebarConnectingHost')
-                    : t('sidebarConnectHostTooltip', { host: ws.host }),
-                  onClick: (e) => {
-                    e.stopPropagation()
-                    void connectHostFromSidebar(ws.host)
-                  },
-                }, h(ConnectLinkIcon, { size: 15 })))),
-
-              // Session Rows when connected & expanded
-              expanded && visibleSessions.map((node) => {
-                const selected = node.id === currentSessionId
-                const rowTitle = node.blank
-                  ? t('sidebarNewSessionTitle')
-                  : (node.title || t('sidebarUntitledSession'))
-                const isRenamingThisSession = renamingTarget?.kind === 'session' && renamingTarget.id === node.id
-                const isSessionMenuOpen = openMenu?.kind === 'session' && openMenu.id === node.id
-
-                return h('div', {
-                  key: node.id,
-                  className: 'dsh-rc-rw-session-row',
-                  role: 'treeitem',
-                  'aria-selected': selected,
-                  'data-selected': selected ? 'true' : 'false',
-                  'data-menu-open': isSessionMenuOpen ? 'true' : 'false',
-                  'data-session-id': node.id,
-                  onClick: () => {
-                    if (isRenamingThisSession) return
-                    handleOpenSession(node.id, localId)
-                  },
-                  onContextMenu: (e) => {
-                    if (node.blank) return
-                    e.preventDefault()
-                    e.stopPropagation()
-                    setOpenMenu({
-                      kind: 'session',
-                      id: node.id,
-                      x: e.clientX,
-                      y: e.clientY,
-                      node,
-                      rowTitle,
-                    })
-                  },
-                },
-                h('span', { className: 'dsh-rc-rw-slot' },
-                  !node.blank && node.dotState !== 'idle' && h('span', {
-                    className: 'dsh-rc-rw-status-dot',
-                    'data-state': node.dotState,
-                  })),
-
-                isRenamingThisSession
-                  ? h('input', {
-                    ref: renameInputRef,
-                    type: 'text',
-                    className: 'dsh-rc-rw-rename-input',
-                    value: renamingTarget.value,
-                    onClick: (e) => e.stopPropagation(),
-                    onChange: (e) => setRenamingTarget({ ...renamingTarget, value: e.target.value }),
-                    onBlur: () => { void commitRename() },
-                    onKeyDown: (e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        void commitRename()
-                      } else if (e.key === 'Escape') {
-                        e.preventDefault()
-                        setRenamingTarget(null)
-                      }
+              } else {
+                if (hostInfo?.url) {
+                  items.push({
+                    id: 'remote-ssh-connect.open-native',
+                    label: t('menuOpenRemoteNative', { host: parsed.host }),
+                    icon: { key: 'remote-ssh-connect.open-native' },
+                    run: () => {
+                      window.open(hostInfo.url, '_blank', 'noopener,noreferrer')
                     },
                   })
-                  : h('span', {
-                    className: 'dsh-rc-rw-title',
-                    onDoubleClick: node.blank
-                      ? undefined
-                      : (e) => {
-                        e.stopPropagation()
-                        setRenamingTarget({ kind: 'session', id: node.id, value: node.title || rowTitle })
-                      },
-                  }, rowTitle),
-
-                !node.blank && h('span', { className: 'dsh-rc-rw-resting' },
-                  h('span', { className: 'dsh-rc-rw-time' }, formatRelativeTime(node.updatedAt, nowMs, t)),
-                  node.pinned && h('span', { className: 'dsh-rc-rw-pin' }, h(PinSmallIcon, { size: 14 }))),
-
-                !node.blank && h('span', {
-                  className: 'dsh-rc-rw-actions',
-                  onClick: (e) => e.stopPropagation(),
-                },
-                h('button', {
-                  type: 'button',
-                  className: 'dsh-rc-rw-icon-btn',
-                  title: t('sidebarSessionActionsTooltip', { name: rowTitle }),
-                  'aria-label': t('sidebarSessionActionsTooltip', { name: rowTitle }),
-                  onClick: (e) => {
-                    e.stopPropagation()
-                    const rect = e.currentTarget.getBoundingClientRect()
-                    setOpenMenu({
-                      kind: 'session',
-                      id: node.id,
-                      x: rect.left,
-                      y: rect.bottom + 4,
-                      node,
-                      rowTitle,
-                    })
+                }
+                items.push({
+                  id: 'remote-ssh-connect.disconnect',
+                  label: t('menuDisconnectHost', { host: parsed.host }),
+                  icon: { key: 'remote-ssh-connect.disconnect' },
+                  run: () => {
+                    void callHost('disconnect', { host: parsed.host }).then(() => refreshSharedState())
                   },
-                }, h(MoreHorizontalIcon, { size: 16 }))))
-              }),
-
-              expanded && (hiddenSessionCount > 0 || watermark > 5) && sessionNodes.length > 5 && h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-overflow-btn',
-                onClick: () => {
-                  setExpandedWatermarks((prev) => ({
-                    ...prev,
-                    [localId]: hiddenSessionCount === 0 ? 5 : watermark + 10,
-                  }))
-                },
-              }, hiddenSessionCount === 0
-                ? t('sidebarShowLessSessions')
-                : t('sidebarShowMoreSessions', { n: String(hiddenSessionCount) })))
-            })),
-
-          // Context / Action Popover Menu
-          openMenu && h('div', {
-            className: 'dsh-rc-rw-menu',
-            role: 'menu',
-            style: {
-              left: `${Math.min(openMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 800) - 210)}px`,
-              top: `${Math.min(openMenu.y, (typeof window !== 'undefined' ? window.innerHeight : 600) - 180)}px`,
+                })
+              }
+              return items
             },
-            onClick: (e) => e.stopPropagation(),
-          },
-          openMenu.kind === 'workspace'
-            ? h(React.Fragment, null,
-              !openMenu.isConnected && h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                onClick: () => {
-                  const targetHost = openMenu.ws.host
-                  setOpenMenu(null)
-                  void connectHostFromSidebar(targetHost)
-                },
-              }, t('menuConnectHost', { host: openMenu.ws.host })),
-              openMenu.isConnected && openMenu.hostInfo?.url && h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                onClick: () => {
-                  const url = openMenu.hostInfo.url
-                  setOpenMenu(null)
-                  window.open(url, '_blank', 'noopener,noreferrer')
-                },
-              }, t('menuOpenRemoteNative', { host: openMenu.ws.host })),
-              h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                onClick: () => {
-                  const wsId = openMenu.id
-                  const curTitle = openMenu.displayTitle
-                  setOpenMenu(null)
-                  setRenamingTarget({ kind: 'workspace', id: wsId, value: curTitle })
-                },
-              }, t('menuRenameWorkspace')),
-              openMenu.isConnected && h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                onClick: () => {
-                  const targetHost = openMenu.ws.host
-                  setOpenMenu(null)
-                  void callHost('disconnect', { host: targetHost }).then(() => refreshSharedState())
-                },
-              }, t('menuDisconnectHost', { host: openMenu.ws.host })),
-              h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                'data-danger': 'true',
-                onClick: () => {
-                  const wsId = openMenu.id
-                  setOpenMenu(null)
-                  void handleRemoveWorkspace(wsId)
-                },
-              }, t('menuRemoveWorkspace')))
-            : h(React.Fragment, null,
-              h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                onClick: () => {
-                  const sid = openMenu.id
-                  const curTitle = openMenu.node.title || openMenu.rowTitle
-                  setOpenMenu(null)
-                  setRenamingTarget({ kind: 'session', id: sid, value: curTitle })
-                },
-              }, t('menuRenameSession')),
-              h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                onClick: () => {
-                  const sid = openMenu.id
-                  const isPinned = openMenu.node.pinned
-                  setOpenMenu(null)
-                  const uiWs = ctx.get?.('uiWorkspace')
-                  if (isPinned) void uiWs?.unpinSession?.(sid)
-                  else void uiWs?.pinSession?.(sid)
-                },
-              }, openMenu.node.pinned ? t('menuUnpinSession') : t('menuPinSession')),
-              h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                onClick: () => {
-                  const sid = openMenu.id
-                  setOpenMenu(null)
-                  void ctx.get?.('uiWorkspace')?.forkSession?.(sid)
-                },
-              }, t('menuForkSession')),
-              h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                onClick: () => {
-                  const sid = openMenu.id
-                  setOpenMenu(null)
-                  try { void navigator.clipboard.writeText(sid) } catch {}
-                },
-              }, t('menuCopySessionId')),
-              h('button', {
-                type: 'button',
-                className: 'dsh-rc-rw-menu-item',
-                'data-danger': 'true',
-                onClick: () => {
-                  const sid = openMenu.id
-                  setOpenMenu(null)
-                  void ctx.get?.('uiWorkspace')?.archiveSession?.(sid)
-                },
-              }, t('menuArchiveSession')))))
+          })
+        }, 'remote-ssh-connect: workspace contextMenu')
+
+        /**
+         * Synchronize `data-rc-status` and `data-rc-host` attributes onto remote workspace rows
+         * (`[data-row-key^="workspace:remote:"]`) in the built-in Workspaces list so the VS Code-style
+         * remote corner badge and disconnected Connect-Host button reflect live connection state.
+         */
+        function decorateRemoteWorkspaceRowsInDom() {
+          if (typeof document === 'undefined') return
+          try {
+            // Remove any legacy separate Remote Workspaces mount node if present from a prior version
+            const legacyMount = document.getElementById('dsh-rc-remote-workspaces-mount')
+            if (legacyMount) legacyMount.remove()
+
+            const rows = document.querySelectorAll('[data-row-key^="workspace:remote:"]')
+            for (const row of rows) {
+              const rowKey = row.getAttribute('data-row-key') || ''
+              const wsId = rowKey.startsWith('workspace:') ? rowKey.slice('workspace:'.length) : ''
+              const parsed = parseLocalWorkspaceId(wsId)
+              if (!parsed) continue
+              const hostInfo = sharedState.hostsByAlias.get(parsed.host)
+              const wsRec = sharedState.syncedWorkspaces.find((w) => w.localWorkspaceId === wsId)
+              const status = hostInfo?.status || wsRec?.hostStatus || 'disconnected'
+              if (row.getAttribute('data-rc-status') !== status) {
+                row.setAttribute('data-rc-status', status)
+              }
+              if (row.getAttribute('data-rc-host') !== parsed.host) {
+                row.setAttribute('data-rc-host', parsed.host)
+              }
+
+              const actionsSpan = row.lastElementChild
+              if (!actionsSpan) continue
+              let connectBtn = actionsSpan.querySelector('.dsh-rc-inline-connect-btn')
+
+              if (status !== 'connected') {
+                const isConnecting = status === 'connecting'
+                const tip = isConnecting
+                  ? t('sidebarConnectingHost')
+                  : `${t('sidebarConnectHost')} (${parsed.host})`
+                if (!connectBtn) {
+                  connectBtn = document.createElement('button')
+                  connectBtn.type = 'button'
+                  connectBtn.className = 'dsh-rc-inline-connect-btn'
+                  connectBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6.5 9.5L9.5 6.5M5 7L3.5 8.5C2.4 9.6 2.4 11.4 3.5 12.5C4.6 13.6 6.4 13.6 7.5 12.5L9 11M11 9L12.5 7.5C13.6 6.4 13.6 4.6 12.5 3.5C11.4 2.4 9.6 2.4 8.5 3.5L7 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`
+                  connectBtn.addEventListener('click', (e) => {
+                    e.stopPropagation()
+                    e.preventDefault()
+                    void connectHostFromSidebar(parsed.host)
+                  })
+                  actionsSpan.appendChild(connectBtn)
+                }
+                connectBtn.disabled = isConnecting
+                if (connectBtn.getAttribute('title') !== tip) {
+                  connectBtn.setAttribute('title', tip)
+                  connectBtn.setAttribute('aria-label', tip)
+                }
+              } else if (connectBtn) {
+                connectBtn.remove()
+              }
+            }
+          } catch {}
         }
 
         /**
          * Frame-wide overlay mounted in `shell.overlay`:
-         * - Portals `RemoteWorkspacesSidebarSection` into `#dsh-rc-remote-workspaces-mount` right above `Workspaces`.
+         * - Injects global CSS (including the VS Code-style remote corner badge on remote workspace folders).
+         * - Syncs connection status attributes onto remote workspace rows in the built-in Workspaces list.
          * - Shows `InvalidatedWorkspaceModal` whenever a remote workspace was deleted on the remote host.
          * - Shows `AuthModal` when connecting a host from the sidebar while outside the SSH Connect page.
          */
-        function RemoteConnectShellOverlay(slotProps = {}) {
+        function RemoteConnectShellOverlay() {
           const [, setTick] = React.useState(0)
-          const [mountNode, setMountNode] = React.useState(() => ensureSidebarMountNode())
 
           React.useEffect(() => {
             const unsub = sharedState.subscribe(() => {
               setTick((n) => n + 1)
-              const m = ensureSidebarMountNode()
-              if (m !== mountNode) setMountNode(m)
+              decorateRemoteWorkspaceRowsInDom()
             })
             void refreshSharedState()
+            decorateRemoteWorkspaceRowsInDom()
             return unsub
-          }, [mountNode])
+          }, [])
 
           React.useEffect(() => {
             if (!ctx.locale?.subscribe) return undefined
             return ctx.locale.subscribe(() => {
               setTick((n) => n + 1)
+              decorateRemoteWorkspaceRowsInDom()
             })
           }, [])
 
@@ -3181,12 +3033,10 @@ window.__ModuleLoader__.load({
           }, [sharedState.authPrompts.length])
 
           React.useEffect(() => {
-            const m = ensureSidebarMountNode()
-            if (m !== mountNode) setMountNode(m)
+            decorateRemoteWorkspaceRowsInDom()
             if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') return undefined
             const obs = new MutationObserver(() => {
-              const currentMount = ensureSidebarMountNode()
-              setMountNode((prev) => (prev === currentMount ? prev : currentMount))
+              decorateRemoteWorkspaceRowsInDom()
             })
             obs.observe(document.body, { childList: true, subtree: true })
             return () => obs.disconnect()
@@ -3214,21 +3064,9 @@ window.__ModuleLoader__.load({
             await refreshSharedState()
           }
 
-          const sidebarSectionEl = h(RemoteWorkspacesSidebarSection, {
-            useWorkspaces: slotProps.useWorkspaces,
-            useSessions: slotProps.useSessions,
-            useSessionStatus: slotProps.useSessionStatus,
-            usePanelInfo: slotProps.usePanelInfo,
-          })
-
-          const renderedSidebarSection = ReactDOM && typeof ReactDOM.createPortal === 'function'
-            ? (mountNode ? ReactDOM.createPortal(sidebarSectionEl, mountNode) : null)
-            : sidebarSectionEl
-
           return h(React.Fragment, null,
             h('style', null, GLOBAL_SIDEBAR_CSS),
             h('style', null, PAGE_CSS),
-            renderedSidebarSection,
             firstInvalidated && h(InvalidatedWorkspaceModal, {
               workspaceInfo: firstInvalidated,
               onConfirmRemove: handleAckInvalidWorkspace,
