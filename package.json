@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-ssh-connect",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Connect to remote Linux hosts over SSH, provision matching DSH versions in ~/.dsh-remote-ssh-connect, sync local plugins and remote workspaces into a dedicated Remote Workspaces sidebar section, and forward ports for local browser access.",
   "license": "MIT",
@@ -17,7 +17,7 @@
   },
   "icon": "./icon.svg",
   "scripts": {
-    "test": "node --test test/remote-ssh-connect.test.js"
+    "test": "node --test --test-isolation=none test/remote-ssh-connect.test.js"
   },
   "exports": {
     ".": "./index.js",

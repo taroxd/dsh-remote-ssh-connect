@@ -34,6 +34,16 @@ import {
 import { AskpassCoordinator, classifyAuthPrompt } from '../src/askpass-server.js'
 import { EVENT_PREFIX } from '../src/remote-script.js'
 
+async function waitFor(predicate, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const val = await predicate()
+    if (val) return val
+    await new Promise((r) => setTimeout(r, 15))
+  }
+  return predicate()
+}
+
 async function runTests() {
   // 1. SSH config parsing & wildcard exclusion (VS Code Remote-SSH rules)
   {
@@ -248,9 +258,8 @@ Match host 203.0.113.*
         body: JSON.stringify({ token: sessEnv.token, prompt: 'Password:' }),
       }).then((r) => r.json())
 
-      // Wait briefly for server to register prompt
-      await new Promise((r) => setTimeout(r, 50))
-      const pending = coordinator.getPendingPromptForHost('test-host')
+      // Wait for server to register prompt
+      const pending = await waitFor(() => coordinator.getPendingPromptForHost('test-host'))
       assert.ok(pending)
       assert.equal(pending.prompt, 'Password:')
       assert.equal(pending.kind, 'password')
@@ -364,6 +373,7 @@ Match host 203.0.113.*
         sshConfigPath,
         dshVersion: '0.2.2-rc.3',
         spawnProcess: mockSpawn,
+        fetchImpl: async () => new Response(null, { status: 404 }),
         openBrowser: async (url) => ({ opened: false, url, fallbackRequired: true, reason: 'Headless test environment' }),
       })
 
@@ -375,22 +385,28 @@ Match host 203.0.113.*
         await manager.connectHost('otp-node', { waitForReady: false })
 
         // Wait for Password prompt
-        await new Promise((r) => setTimeout(r, 40))
-        let st = await manager.getHostStatus('otp-node')
+        let st = await waitFor(async () => {
+          const cur = await manager.getHostStatus('otp-node')
+          return cur.authPrompt?.kind === 'password' ? cur : null
+        })
         assert.equal(st.phase, 'awaiting_auth')
         assert.equal(st.authPrompt?.kind, 'password')
         manager.submitAuth('otp-node', { promptId: st.authPrompt.id, value: 'hunter2' })
 
         // Wait for OTP prompt
-        await new Promise((r) => setTimeout(r, 40))
-        st = await manager.getHostStatus('otp-node')
+        st = await waitFor(async () => {
+          const cur = await manager.getHostStatus('otp-node')
+          return cur.authPrompt?.kind === 'otp' ? cur : null
+        })
         assert.equal(st.phase, 'awaiting_auth')
         assert.equal(st.authPrompt?.kind, 'otp')
         manager.submitAuth('otp-node', { promptId: st.authPrompt.id, value: '654321' })
 
         // Wait for attempt 1 to settle with REMOTE_PORT_IN_USE
-        await new Promise((r) => setTimeout(r, 50))
-        st = await manager.getHostStatus('otp-node')
+        st = await waitFor(async () => {
+          const cur = await manager.getHostStatus('otp-node')
+          return cur.status === 'error' ? cur : null
+        })
         assert.deepEqual(receivedAuthAnswers, ['hunter2', '654321'])
         assert.equal(st.status, 'error')
         assert.equal(st.error?.code, 'REMOTE_PORT_IN_USE')
@@ -476,9 +492,10 @@ Match host 203.0.113.*
       await manager.init()
       try {
         await manager.connectHost('cancel-node', { waitForReady: false })
-        await new Promise((r) => setTimeout(r, 40))
-
-        let st = await manager.getHostStatus('cancel-node')
+        let st = await waitFor(async () => {
+          const cur = await manager.getHostStatus('cancel-node')
+          return cur.authPrompt ? cur : null
+        })
         assert.equal(st.status, 'connecting')
         assert.equal(st.phase, 'awaiting_auth')
         assert.ok(st.authPrompt)
