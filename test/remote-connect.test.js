@@ -170,6 +170,9 @@ Match host 203.0.113.*
     assert.equal(script.includes('REMOTE_PORT=3080'), true)
     assert.equal(script.includes('LOCAL_PORT=54321'), true)
     assert.equal(supervisorJs.includes('--from-default-profile'), true)
+    assert.equal(supervisorJs.includes('callRemotePluginManager'), true)
+    assert.equal(supervisorJs.includes('removeBundle'), true)
+    assert.equal(supervisorJs.includes('installBundle'), true)
     assert.equal(script.includes('MAX_VERSIONS=3'), true)
     assert.equal(script.includes('bash -lic'), true)
     assert.equal(script.includes('.bashrc'), true)
@@ -177,6 +180,9 @@ Match host 203.0.113.*
     assert.ok(encodedScript.length > 100)
     assert.equal(sshCommand.startsWith('mkdir -p ~/.dsh-remote-connect && IFS= read -r B'), true)
     assert.ok(sshCommand.length < 250, 'sshCommand must stay compact to avoid ENAMETOOLONG on Windows')
+
+    const { Script } = await import('node:vm')
+    assert.doesNotThrow(() => new Script(supervisorJs), 'supervisorJs must be valid JavaScript syntax')
 
     const killCmd = buildKillRemotePortScript(3080)
     assert.equal(killCmd.startsWith('mkdir -p ~/.dsh-remote-connect && printf %s '), true)
@@ -590,20 +596,78 @@ Match host 203.0.113.*
         'utf8',
       )
 
+      // Also verify that packLocalPluginDirectory excludes .pnpm-store, tmp, and .tgz artifacts
+      await mkdir(join(localPluginDir, '.pnpm-store', 'v11'), { recursive: true })
+      await writeFile(join(localPluginDir, '.pnpm-store', 'v11', 'blob'), 'ignored', 'utf8')
+      await writeFile(join(localPluginDir, 'my-local-bundle-1.0.0.tgz'), 'ignored-tgz', 'utf8')
+
       const discovered = await listLocalPlugins({ profileDir })
       assert.equal(discovered.plugins.length, 3)
 
       const packedBuf = await packLocalPluginDirectory(localPluginDir)
       assert.ok(packedBuf.length > 0)
+      const { gunzipSync } = await import('node:zlib')
+      const unpackedPayload = JSON.parse(gunzipSync(packedBuf).toString('utf8'))
+      assert.equal(
+        unpackedPayload.files.some((f) => f.path.includes('.pnpm-store') || f.path.endsWith('.tgz')),
+        false,
+        'packLocalPluginDirectory must exclude .pnpm-store and .tgz files',
+      )
 
-      // Simulated remote plugin state
+      // Simulated remote plugin state (including cross-source: my-local-bundle installed from npm on remote at older v1.0.0)
       const remotePluginsState = new Map([
-        ['demo-npm-bundle', { installed: true, remoteVersion: '1.9.0' }], // remote <= local (auto reinstall)
-        ['demo-gh-bundle', { installed: true, remoteVersion: '3.0.0' }],  // remote > local (confirm required)
-        ['my-local-bundle', { installed: false, remoteVersion: null }],   // not installed on remote
+        ['demo-npm-bundle', { installed: true, remoteVersion: '1.9.0', remoteSourceKind: 'npm' }], // remote <= local (auto reinstall)
+        ['demo-gh-bundle', { installed: true, remoteVersion: '3.0.0', remoteSourceKind: 'npm' }],  // remote > local (confirm required)
+        ['my-local-bundle', { installed: true, remoteVersion: '1.0.0', remoteSourceKind: 'npm' }], // remote has older npm version, local is local source!
       ])
       const installCalls = []
       let sshSpawnCount = 0
+
+      // Mock remote DSH HTTP server to verify tunnel pluginManager RPC calls (removeBundle / setBundleEnabled)
+      const { createServer: createHttpServer } = await import('node:http')
+      const remoteRpcCalls = []
+      const mockRemoteDshServer = createHttpServer((req, res) => {
+        const u = new URL(req.url || '/', 'http://127.0.0.1')
+        if (req.method === 'GET' && u.pathname === '/' && u.searchParams.get('token') === 't') {
+          res.writeHead(303, {
+            'set-cookie': 'dsh-auth-mock=v1.mock.sig; Path=/; HttpOnly',
+            location: './',
+          })
+          res.end()
+          return
+        }
+        if (req.method === 'POST' && u.pathname.startsWith('/api/pluginManager/')) {
+          let body = ''
+          req.on('data', (c) => { body += c })
+          req.on('end', () => {
+            const parsed = JSON.parse(body)
+            remoteRpcCalls.push({
+              method: parsed.method,
+              args: parsed.payload?.args,
+              cookie: req.headers.cookie,
+            })
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({
+              type: 'server-response',
+              rpcId: parsed.rpcId,
+              result: {
+                ok: true,
+                value: {
+                  changed: true,
+                  application: 'applied',
+                  stage: parsed.method.endsWith('removeBundle') ? 'remove' : 'enable',
+                  target: parsed.payload?.args?.name || '',
+                },
+              },
+            }))
+          })
+          return
+        }
+        res.writeHead(404)
+        res.end()
+      })
+      await new Promise((resolve) => mockRemoteDshServer.listen(0, '127.0.0.1', resolve))
+      const mockDshPort = mockRemoteDshServer.address().port
 
       const mockSpawn = (_cmd, _args) => {
         sshSpawnCount += 1
@@ -620,7 +684,7 @@ Match host 203.0.113.*
         }
 
         setTimeout(() => {
-          child.stdout.write(`${EVENT_PREFIX}{"type":"ready","url":"http://127.0.0.1:43333/?token=t","remotePort":3080,"localPort":43333,"profile":"web","pid":1111}\n`)
+          child.stdout.write(`${EVENT_PREFIX}{"type":"ready","url":"http://127.0.0.1:${mockDshPort}/?token=t","remotePort":3080,"localPort":${mockDshPort},"profile":"web","pid":1111}\n`)
         }, 10)
 
         const chunksById = new Map()
@@ -655,6 +719,7 @@ Match host 203.0.113.*
                     packageName: pkgName,
                     installed: st.installed,
                     remoteVersion: st.remoteVersion,
+                    remoteSourceKind: st.remoteSourceKind ?? null,
                   },
                 })}\n`)
               } else if (req.method === 'install_plugin') {
@@ -697,12 +762,24 @@ Match host 203.0.113.*
         await manager.connectHost('sync-box', { waitForReady: true })
         assert.equal(sshSpawnCount, 1, 'Only 1 SSH connection should be opened')
 
-        // Case A: Not installed on remote (local source) -> installs directly over existing SSH stdin channel
+        // Case A: Installed on remote from npm (v1.0.0) while local is local directory source (v1.2.0) ->
+        // unloads & removes remote npm copy via live PluginManager, streams local archive, and enables new local bundle
         const resLocal = await manager.syncPluginToHost('sync-box', { pluginName: 'my-local-bundle' })
         assert.equal(resLocal.status, 'synced')
         assert.equal(resLocal.sourceKind, 'local')
-        assert.equal(resLocal.reinstalled, false)
+        assert.equal(resLocal.reinstalled, true)
+        assert.equal(resLocal.previousRemoteVersion, '1.0.0')
         assert.ok(installCalls.at(-1).payloadLen > 0)
+        assert.equal(
+          remoteRpcCalls.some((c) => c.method === 'pluginManager/removeBundle' && c.args?.name === 'my-local-bundle'),
+          true,
+          'Must invoke live remote pluginManager/removeBundle before cross-source reinstall',
+        )
+        assert.equal(
+          remoteRpcCalls.some((c) => c.method === 'pluginManager/setBundleEnabled' && c.args?.name === 'my-local-bundle' && c.args?.enabled === true),
+          true,
+          'Must invoke live remote pluginManager/setBundleEnabled after CLI fallback install',
+        )
 
         // Case B: Installed on remote with version 1.9.0 <= local 2.0.0 -> deletes & reinstalls directly without confirmation
         const resNpm = await manager.syncPluginToHost('sync-box', { pluginName: 'demo-npm-bundle' })
@@ -735,6 +812,7 @@ Match host 203.0.113.*
         await manager.disconnectHost('sync-box')
       } finally {
         await manager.dispose()
+        await new Promise((resolve) => mockRemoteDshServer.close(resolve))
       }
     } finally {
       await rm(tmpRoot, { recursive: true, force: true })

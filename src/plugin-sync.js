@@ -291,7 +291,18 @@ export async function listLocalPlugins(options = {}) {
   return { profileDir, plugins }
 }
 
-const IGNORED_DIRS = new Set(['.git', 'node_modules', '.tmp', '.plugin-manager', 'coverage'])
+const IGNORED_DIRS = new Set([
+  '.git',
+  '.git-backup',
+  'node_modules',
+  '.pnpm-store',
+  '.npm-cache',
+  '.tmp',
+  'tmp',
+  '.dev',
+  '.plugin-manager',
+  'coverage',
+])
 const IGNORED_FILES = new Set(['.DS_Store', 'Thumbs.db'])
 
 /**
@@ -309,7 +320,7 @@ export async function packLocalPluginDirectory(rootDir) {
         if (IGNORED_DIRS.has(entry.name)) continue
         await walk(join(currentDir, entry.name))
       } else if (entry.isFile()) {
-        if (IGNORED_FILES.has(entry.name) || entry.name.endsWith('.log')) continue
+        if (IGNORED_FILES.has(entry.name) || entry.name.endsWith('.log') || TARBALL_EXT.test(entry.name)) continue
         const fullPath = join(currentDir, entry.name)
         const relPath = relative(rootDir, fullPath).split('\\').join('/')
         const content = await readFile(fullPath)
@@ -352,6 +363,15 @@ const profileManifestPath = path.join(profileDir, 'package.json');
 let installed = false;
 let remoteVersion = null;
 let recordedSpec = null;
+let remoteSourceKind = null;
+
+function classifyRecordedSpec(spec) {
+  if (!spec || typeof spec !== 'string') return null;
+  const s = spec.trim();
+  if (/^(?:file|link):/i.test(s) || s.startsWith('/') || /^\\.{1,2}(?:[\\\\/]|$)/.test(s)) return 'local';
+  if (/^(?:github|gitlab|bitbucket|gist):/i.test(s) || /^git(?:\\+[a-z]+)?:\\/\\/|^git@[^:]+:/i.test(s) || /^https?:\\/\\/[^/]+\\/[^/]+\\/[^/#]+(?:\\.git)?(?:#.*)?$/i.test(s)) return 'github';
+  return 'npm';
+}
 
 if (fs.existsSync(profileManifestPath)) {
   try {
@@ -361,6 +381,7 @@ if (fs.existsSync(profileManifestPath)) {
     if (Object.prototype.hasOwnProperty.call(deps, pkgName) || bundles.includes(pkgName)) {
       installed = true;
       recordedSpec = deps[pkgName] || null;
+      remoteSourceKind = classifyRecordedSpec(recordedSpec);
     }
   } catch {}
 }
@@ -382,6 +403,7 @@ process.stdout.write(PREFIX + JSON.stringify({
   installed,
   remoteVersion,
   recordedSpec,
+  remoteSourceKind,
 }) + '\\n');
 `.trim()
 
@@ -397,7 +419,7 @@ if ! command -v node >/dev/null 2>&1; then
     break
   done
 fi
-node -e "$(printf %s '${checkerB64}' | base64 -d)"
+node --input-type=commonjs -e "$(printf %s '${checkerB64}' | base64 -d)"
 `.trim()
 
   const encoded = Buffer.from(shScript, 'utf8').toString('base64')
@@ -479,39 +501,41 @@ function runDshPlugin(args) {
   });
 }
 
-// 1. If local source, read base64-encoded stdin into a binary Buffer first
-let stdinBuf = null;
+function runPnpmInDir(dir, args) {
+  return spawnSync('pnpm', ['--dir', dir, ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: process.env,
+    timeout: 180_000,
+  });
+}
+
+const registries = [null, 'https://registry.npmmirror.com/', 'https://registry.npmjs.org/'];
+const profileManifestPath = path.join(profileDir, 'package.json');
+const nodeModulesPkgDir = path.join(profileDir, 'node_modules', ...pkgName.split('/'));
+
+function isPluginStillInProfile() {
+  if (fs.existsSync(path.join(nodeModulesPkgDir, 'package.json'))) return true;
+  if (!fs.existsSync(profileManifestPath)) return false;
+  try {
+    const pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
+    const deps = pm.dependencies || {};
+    const bundles = (pm.dsh && pm.dsh.profile && Array.isArray(pm.dsh.profile.bundles)) ? pm.dsh.profile.bundles : [];
+    return Object.prototype.hasOwnProperty.call(deps, pkgName) || bundles.includes(pkgName);
+  } catch {
+    return false;
+  }
+}
+
+// 1. If local source, read base64-encoded stdin into a binary Buffer and materialize under ~/.dsh-remote-connect/local-plugins
+let targetSpec = installSpec;
 if (sourceKind === 'local') {
   const rawBase64 = fs.readFileSync(0, 'utf8').replace(/\\s+/g, '');
   if (!rawBase64) {
     emit({ type: 'plugin_sync_error', message: 'Empty payload received for local plugin sync' });
     process.exit(1);
   }
-  stdinBuf = Buffer.from(rawBase64, 'base64');
-}
-
-// 2. If already installed on remote, deselect and remove first while existing files remain intact
-const profileManifestPath = path.join(profileDir, 'package.json');
-if (reinstall && fs.existsSync(profileManifestPath)) {
-  try {
-    const pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
-    if (pm.dsh && pm.dsh.profile && Array.isArray(pm.dsh.profile.bundles)) {
-      const nextBundles = pm.dsh.profile.bundles.filter((b) => b !== pkgName);
-      if (nextBundles.length !== pm.dsh.profile.bundles.length) {
-        pm.dsh.profile.bundles = nextBundles;
-        fs.writeFileSync(profileManifestPath, JSON.stringify(pm, null, 2) + '\\n');
-        // Allow running dsh-hmr to observe bundle deselection before removing node_modules
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
-      }
-    }
-  } catch {}
-
-  runDshPlugin(['remove', pkgName]);
-}
-
-// 3. Materialize local plugin files under ~/.dsh-remote-connect/local-plugins if local source
-let targetSpec = installSpec;
-if (sourceKind === 'local') {
+  const stdinBuf = Buffer.from(rawBase64, 'base64');
   const localPluginsRoot = path.join(baseDir, 'local-plugins');
   fs.mkdirSync(localPluginsRoot, { recursive: true });
 
@@ -534,29 +558,94 @@ if (sourceKind === 'local') {
         mode: fileEntry.mode || 0o644,
       });
     }
-    targetSpec = destDir;
+    const destPkgPath = path.join(destDir, 'package.json');
+    if (fs.existsSync(destPkgPath)) {
+      try {
+        const destPkg = JSON.parse(fs.readFileSync(destPkgPath, 'utf8'));
+        const hasDeps = (destPkg.dependencies && Object.keys(destPkg.dependencies).length > 0) ||
+          (destPkg.optionalDependencies && Object.keys(destPkg.optionalDependencies).length > 0);
+        if (hasDeps) {
+          for (const reg of registries) {
+            const depRes = runPnpmInDir(destDir, [
+              'install',
+              '--prod',
+              '--ignore-scripts',
+              '--no-frozen-lockfile',
+              ...(reg ? ['--registry=' + reg] : []),
+            ]);
+            if (depRes.status === 0) break;
+          }
+        }
+      } catch {}
+    }
+    targetSpec = (localLinkPrefix === 'file' ? 'file:' : 'link:') + destDir;
   }
 }
 
-// 3. Install plugin via dsh plugin --profile <profile> add <targetSpec>
-let addRes;
-if (sourceKind === 'npm') {
-  const registries = [null, 'https://registry.npmmirror.com/', 'https://registry.npmjs.org/'];
-  for (const reg of registries) {
-    const args = ['add', targetSpec, '--save-exact', ...(reg ? ['--registry=' + reg] : [])];
-    addRes = runDshPlugin(args);
-    if (addRes.status === 0) break;
+// 2. If already installed on remote, deselect and remove completely before adding new source
+if (reinstall || isPluginStillInProfile()) {
+  if (fs.existsSync(profileManifestPath)) {
+    try {
+      const pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
+      if (pm.dsh && pm.dsh.profile && Array.isArray(pm.dsh.profile.bundles)) {
+        const nextBundles = pm.dsh.profile.bundles.filter((b) => b !== pkgName);
+        if (nextBundles.length !== pm.dsh.profile.bundles.length) {
+          pm.dsh.profile.bundles = nextBundles;
+          fs.writeFileSync(profileManifestPath, JSON.stringify(pm, null, 2) + '\\n');
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 700);
+        }
+      }
+    } catch {}
   }
-} else {
-  addRes = runDshPlugin(['add', targetSpec]);
-  // If git plugin requires build script approval, record allowBuilds and retry once
-  if (addRes.status !== 0 && sourceKind === 'github') {
+
+  for (const reg of registries) {
+    const rmRes = runDshPlugin(['remove', pkgName, ...(reg ? ['--config.registry=' + reg] : [])]);
+    if (rmRes.status === 0) break;
+  }
+
+  // Ensure package.json and node_modules have no leftover entry that would block re-adding or bundle activation
+  if (fs.existsSync(profileManifestPath)) {
+    try {
+      const pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
+      let modified = false;
+      if (pm.dependencies && Object.prototype.hasOwnProperty.call(pm.dependencies, pkgName)) {
+        delete pm.dependencies[pkgName];
+        modified = true;
+      }
+      if (pm.dsh && pm.dsh.profile && Array.isArray(pm.dsh.profile.bundles) && pm.dsh.profile.bundles.includes(pkgName)) {
+        pm.dsh.profile.bundles = pm.dsh.profile.bundles.filter((b) => b !== pkgName);
+        modified = true;
+      }
+      if (modified) {
+        fs.writeFileSync(profileManifestPath, JSON.stringify(pm, null, 2) + '\\n');
+      }
+    } catch {}
+  }
+  try {
+    fs.rmSync(nodeModulesPkgDir, { recursive: true, force: true });
+  } catch {}
+}
+
+// 3. Install plugin via dsh plugin --profile <profile> add <targetSpec> with registry fallback
+let addRes;
+for (const reg of registries) {
+  const args = [
+    'add',
+    targetSpec,
+    ...(sourceKind === 'npm' ? ['--save-exact'] : []),
+    ...(reg ? ['--registry=' + reg] : []),
+  ];
+  addRes = runDshPlugin(args);
+  if (addRes.status === 0) break;
+  const out = ((addRes && addRes.stderr) || '') + '\\n' + ((addRes && addRes.stdout) || '');
+  if (/ERR_PNPM_IGNORED_BUILDS|Ignored build scripts|ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED/i.test(out) || sourceKind === 'github') {
     const wsPath = path.join(profileDir, 'pnpm-workspace.yaml');
     if (fs.existsSync(wsPath)) {
       const wsContent = fs.readFileSync(wsPath, 'utf8');
       if (!wsContent.includes('dangerouslyAllowAllBuilds')) {
         fs.writeFileSync(wsPath, wsContent.trimEnd() + '\\ndangerouslyAllowAllBuilds: true\\n');
-        addRes = runDshPlugin(['add', targetSpec]);
+        addRes = runDshPlugin(args);
+        if (addRes.status === 0) break;
       }
     }
   }
@@ -568,9 +657,24 @@ if (!addRes || addRes.status !== 0) {
   process.exit(1);
 }
 
+// Ensure bundle is selected in dsh.profile.bundles
+if (fs.existsSync(profileManifestPath)) {
+  try {
+    const pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
+    pm.dsh = pm.dsh || {};
+    pm.dsh.profile = pm.dsh.profile || {};
+    const bundles = Array.isArray(pm.dsh.profile.bundles) ? pm.dsh.profile.bundles : [];
+    if (!bundles.includes(pkgName)) {
+      bundles.push(pkgName);
+      pm.dsh.profile.bundles = bundles;
+      fs.writeFileSync(profileManifestPath, JSON.stringify(pm, null, 2) + '\\n');
+    }
+  } catch {}
+}
+
 // 4. Read back installed version from remote profile
 let installedVersion = null;
-const pkgManifestPath = path.join(profileDir, 'node_modules', ...pkgName.split('/'), 'package.json');
+const pkgManifestPath = path.join(nodeModulesPkgDir, 'package.json');
 if (fs.existsSync(pkgManifestPath)) {
   try {
     const pkgM = JSON.parse(fs.readFileSync(pkgManifestPath, 'utf8'));
@@ -610,7 +714,7 @@ if ! command -v pnpm >/dev/null 2>&1; then
   done
   export PATH="$BASE_DIR/pnpm/bin:$PATH"
 fi
-node -e "$(printf %s '${installerB64}' | base64 -d)"
+node --input-type=commonjs -e "$(printf %s '${installerB64}' | base64 -d)"
 `.trim()
 
   const encoded = Buffer.from(shScript, 'utf8').toString('base64')
