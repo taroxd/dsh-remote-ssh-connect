@@ -425,7 +425,7 @@ process.stdout.write(PREFIX + JSON.stringify({
   const shScript = `
 ${LOGIN_ENV_PREAMBLE}
 set -e
-BASE_DIR="$HOME/.dsh-remote-connect"
+BASE_DIR="$HOME/.dsh-remote-ssh-connect"
 export PATH="$PATH:$BASE_DIR/node/current/bin:$HOME/.local/bin:/usr/local/bin"
 if ! command -v node >/dev/null 2>&1; then
   for CAND in $(ls -1d "$HOME/.nvm/versions/node"/*/bin 2>/dev/null | sort -V -r); do
@@ -437,7 +437,7 @@ node --input-type=commonjs -e "$(printf %s '${checkerB64}' | base64 -d)"
 `.trim()
 
   const encoded = Buffer.from(shScript, 'utf8').toString('base64')
-  return `mkdir -p ~/.dsh-remote-connect && printf %s ${encoded} | base64 -d > ~/.dsh-remote-connect/.chk-$$.sh && exec sh ~/.dsh-remote-connect/.chk-$$.sh`
+  return `mkdir -p ~/.dsh-remote-ssh-connect && printf %s ${encoded} | base64 -d > ~/.dsh-remote-ssh-connect/.chk-$$.sh && exec sh ~/.dsh-remote-ssh-connect/.chk-$$.sh`
 }
 
 /**
@@ -494,7 +494,7 @@ function emit(obj) {
 }
 
 const home = process.env.HOME || '';
-const baseDir = path.join(home, '.dsh-remote-connect');
+const baseDir = path.join(home, '.dsh-remote-ssh-connect');
 const dshHome = process.env.DSH_HOME && process.env.DSH_HOME.trim() !== ''
   ? process.env.DSH_HOME.trim()
   : path.join(home, '.dsh');
@@ -541,7 +541,7 @@ function isPluginStillInProfile() {
   }
 }
 
-// 1. If local source, read base64-encoded stdin into a binary Buffer and materialize under ~/.dsh-remote-connect/local-plugins
+// 1. If local source, read base64-encoded stdin into a binary Buffer and materialize under ~/.dsh-remote-ssh-connect/local-plugins
 let targetSpec = installSpec;
 if (sourceKind === 'local') {
   const rawBase64 = fs.readFileSync(0, 'utf8').replace(/\\s+/g, '');
@@ -713,7 +713,7 @@ emit({
   const shScript = `
 ${LOGIN_ENV_PREAMBLE}
 set -e
-BASE_DIR="$HOME/.dsh-remote-connect"
+BASE_DIR="$HOME/.dsh-remote-ssh-connect"
 export PATH="$PATH:$BASE_DIR/node/current/bin:$BASE_DIR/pnpm/bin:$HOME/.local/bin:/usr/local/bin"
 if ! command -v node >/dev/null 2>&1; then
   for CAND in $(ls -1d "$HOME/.nvm/versions/node"/*/bin 2>/dev/null | sort -V -r); do
@@ -734,5 +734,5 @@ node --input-type=commonjs -e "$(printf %s '${installerB64}' | base64 -d)"
 `.trim()
 
   const encoded = Buffer.from(shScript, 'utf8').toString('base64')
-  return `mkdir -p ~/.dsh-remote-connect && printf %s ${encoded} | base64 -d > ~/.dsh-remote-connect/.inst-$$.sh && exec sh ~/.dsh-remote-connect/.inst-$$.sh`
+  return `mkdir -p ~/.dsh-remote-ssh-connect && printf %s ${encoded} | base64 -d > ~/.dsh-remote-ssh-connect/.inst-$$.sh && exec sh ~/.dsh-remote-ssh-connect/.inst-$$.sh`
 }

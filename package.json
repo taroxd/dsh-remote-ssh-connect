@@ -1,23 +1,23 @@
 {
-  "name": "dsh-remote-connect",
+  "name": "dsh-remote-ssh-connect",
   "version": "1.0.0",
   "type": "module",
-  "description": "Connect to remote Linux hosts over SSH, provision matching DSH versions in ~/.dsh-remote-connect, sync local plugins and remote workspaces into a dedicated Remote Workspaces sidebar section, and forward ports for local browser access.",
+  "description": "Connect to remote Linux hosts over SSH, provision matching DSH versions in ~/.dsh-remote-ssh-connect, sync local plugins and remote workspaces into a dedicated Remote Workspaces sidebar section, and forward ports for local browser access.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/taroxd/dsh-remote-connect.git"
+    "url": "git+https://github.com/taroxd/dsh-remote-ssh-connect.git"
   },
-  "homepage": "https://github.com/taroxd/dsh-remote-connect#readme",
+  "homepage": "https://github.com/taroxd/dsh-remote-ssh-connect#readme",
   "bugs": {
-    "url": "https://github.com/taroxd/dsh-remote-connect/issues"
+    "url": "https://github.com/taroxd/dsh-remote-ssh-connect/issues"
   },
   "engines": {
     "dsh": ">=0.2.2-rc.1 <0.3.0-0"
   },
   "icon": "./icon.svg",
   "scripts": {
-    "test": "node --test test/remote-connect.test.js"
+    "test": "node --test test/remote-ssh-connect.test.js"
   },
   "exports": {
     ".": "./index.js",

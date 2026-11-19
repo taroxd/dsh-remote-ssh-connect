@@ -1,4 +1,4 @@
 - insert:
-    - id: remote-connect
-      name: dsh-remote-connect
+    - id: remote-ssh-connect
+      name: dsh-remote-ssh-connect
       config: {}

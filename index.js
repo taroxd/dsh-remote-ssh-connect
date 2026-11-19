@@ -1,7 +1,7 @@
-// Host half of dsh-remote-connect: manages SSH connections from ~/.ssh/config,
+// Host half of dsh-remote-ssh-connect: manages SSH connections from ~/.ssh/config,
 // persists per-host port/profile settings and synced remote workspaces in storageDomain,
-// bridges local TypertGateway RPC/streams to remote DSH instances, exposes /api/remote-connect/*
-// routes for the Web UI, and registers the remote_connect agent tool.
+// bridges local TypertGateway RPC/streams to remote DSH instances, exposes /api/remote-ssh-connect/*
+// routes for the Web UI, and registers the remote_ssh_connect agent tool.
 
 import {
   RemoteConnectionManager,
@@ -9,9 +9,9 @@ import {
   normalizeSyncedWorkspaceRecord,
 } from './src/connection-manager.js'
 
-export const name = 'remote-connect'
+export const name = 'remote-ssh-connect'
 
-const DOMAIN_NAME = 'dsh_remote_connect'
+const DOMAIN_NAME = 'dsh_remote_ssh_connect'
 const DOMAIN_VERSION = 2
 
 const hostConfigSchema = {
@@ -72,7 +72,7 @@ function unwrapCordisService(svc) {
 
 function registerRoute(ctx, op, handler) {
   ctx.inject(['connection'], (scope) => {
-    const path = `/api/remote-connect/${op}`
+    const path = `/api/remote-ssh-connect/${op}`
     scope.effect(() => scope.connection.fetch.register({
       path,
       methods: ['POST'],
@@ -92,7 +92,7 @@ function registerRoute(ctx, op, handler) {
           return Response.json({ ok: false, error: String(error?.message ?? error) }, { status: 400 })
         }
       },
-    }), `remote-connect: ${path}`)
+    }), `remote-ssh-connect: ${path}`)
   })
 }
 
@@ -146,7 +146,7 @@ function registerGatewayFederation(ctx, manager) {
         gw.dispatchRpc = origDispatchRpc
         gw.openWireStream = origOpenWireStream
       }
-    }, 'remote-connect: typertGateway federation')
+    }, 'remote-ssh-connect: typertGateway federation')
   })
 
   ctx.inject(['workspaceController'], (scope) => {
@@ -154,7 +154,7 @@ function registerGatewayFederation(ctx, manager) {
       const wsCtrl = unwrapCordisService(scope.workspaceController)
       manager.workspaceBridge.attachHostControllers({ workspaceController: wsCtrl })
       return () => {}
-    }, 'remote-connect: workspaceController federation')
+    }, 'remote-ssh-connect: workspaceController federation')
   })
 
   ctx.inject(['sessionController'], (scope) => {
@@ -162,7 +162,7 @@ function registerGatewayFederation(ctx, manager) {
       const sessCtrl = unwrapCordisService(scope.sessionController)
       manager.workspaceBridge.attachHostControllers({ sessionController: sessCtrl })
       return () => {}
-    }, 'remote-connect: sessionController federation')
+    }, 'remote-ssh-connect: sessionController federation')
   })
 
   ctx.inject(['connection'], (scope) => {
@@ -173,7 +173,7 @@ function registerGatewayFederation(ctx, manager) {
           if (handled) return
         } catch {}
         return next()
-      }), 'remote-connect: binary upload proxy')
+      }), 'remote-ssh-connect: binary upload proxy')
     }
   })
 }
@@ -181,7 +181,7 @@ function registerGatewayFederation(ctx, manager) {
 function registerAgentTool(ctx, manager) {
   ctx.inject(['tools'], (scope) => {
     scope.effect(() => scope.tools.register({
-      name: 'remote_connect',
+      name: 'remote_ssh_connect',
       description: 'Manage SSH remote DSH connections configured in ~/.ssh/config: list hosts and their connection statuses, configure per-host remotePort/localPort/profile, connect or disconnect a host, open a connected remote DSH in the default browser, terminate a conflicting process occupying the remote port, sync a local plugin to a connected remote host, or list/sync/remove remote workspaces. Interactive password/OTP entry remains user-only in the SSH Connections UI.',
       parameters: {
         type: 'object',
@@ -353,7 +353,7 @@ function registerAgentTool(ctx, manager) {
             throw new Error(`Unknown action: ${String(action)}`)
         }
       },
-    }), 'remote-connect: tool')
+    }), 'remote-ssh-connect: tool')
   })
 }
 
@@ -387,7 +387,7 @@ export function apply(ctx, config = {}) {
       await ready.catch(() => {})
       await manager.dispose()
     }
-  }, 'remote-connect: lifecycle')
+  }, 'remote-ssh-connect: lifecycle')
 
   ctx.inject(['storageDomain'], (scope) => {
     scope.effect(() => {
@@ -410,7 +410,7 @@ export function apply(ctx, config = {}) {
           manager.workspaceBridge.loadInitialWorkspaces(remoteWorkspacesTable.entries())
           manager.workspaceBridge.publishAllSyncedWorkspacesToLiveFollowers()
         } catch (err) {
-          scope.logger?.warn?.('remote-connect: storageDomain open failed, using in-memory config', err)
+          scope.logger?.warn?.('remote-ssh-connect: storageDomain open failed, using in-memory config', err)
         }
       })()
 
@@ -423,7 +423,7 @@ export function apply(ctx, config = {}) {
           await domain.close().catch(() => {})
         }
       }
-    }, 'remote-connect: storage')
+    }, 'remote-ssh-connect: storage')
   })
 
   registerGatewayFederation(ctx, manager)

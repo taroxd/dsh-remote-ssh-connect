@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Remote SSH connect",
-    "description": "Adds the SSH connect panel to the left sidebar to manage SSH connections from ~/.ssh/config, automatically install matching Node.js and DSH versions under ~/.dsh-remote-connect on remote Linux hosts, sync local plugins by install source, synchronize remote workspaces and sessions into a dedicated Remote Workspaces sidebar section for direct control, and handle interactive password/OTP prompts and port conflicts.",
+    "description": "Adds the SSH connect panel to the left sidebar to manage SSH connections from ~/.ssh/config, automatically install matching Node.js and DSH versions under ~/.dsh-remote-ssh-connect on remote Linux hosts, sync local plugins by install source, synchronize remote workspaces and sessions into a dedicated Remote Workspaces sidebar section for direct control, and handle interactive password/OTP prompts and port conflicts.",
     "detail": "docs/DETAIL.md"
   }
 }

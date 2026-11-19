@@ -487,12 +487,12 @@ export class RemoteConnectionManager {
       }
       if (ev.type === 'dsh_ready') {
         appendLog(ev.cached
-          ? `DSH ${ev.version} already installed in ~/.dsh-remote-connect/${ev.version}`
-          : `Installed DSH ${ev.version} in ~/.dsh-remote-connect/${ev.version}`)
+          ? `DSH ${ev.version} already installed in ~/.dsh-remote-ssh-connect/${ev.version}`
+          : `Installed DSH ${ev.version} in ~/.dsh-remote-ssh-connect/${ev.version}`)
         return
       }
       if (ev.type === 'version_pruned') {
-        appendLog(`Removed oldest version ~/.dsh-remote-connect/${ev.version}`)
+        appendLog(`Removed oldest version ~/.dsh-remote-ssh-connect/${ev.version}`)
         return
       }
       if (ev.type === 'port_in_use') {
@@ -886,7 +886,7 @@ export class RemoteConnectionManager {
   /**
    * Call the remote DSH server's `pluginManager` service over the local SSH port-forwarding tunnel (`session.url`).
    * Used to ensure live HMR unloading/reloading and `plugin-manager/changed` notifications even if the remote
-   * supervisor was started by an earlier version of `dsh-remote-connect`.
+   * supervisor was started by an earlier version of `dsh-remote-ssh-connect`.
    *
    * @param {object} session
    * @param {string} method
@@ -1090,7 +1090,7 @@ export class RemoteConnectionManager {
 
   /**
    * Compare user-installed plugins between the local profile and a connected remote host.
-   * Excludes `dsh-remote-connect` itself (which is a local management plugin).
+   * Excludes `dsh-remote-ssh-connect` itself (which is a local management plugin).
    * @param {string} host
    */
   async compareHostPlugins(host) {
@@ -1112,12 +1112,12 @@ export class RemoteConnectionManager {
     const remotePlugins = Array.isArray(remoteRes?.plugins) ? remoteRes.plugins : []
     const localByName = new Map()
     for (const lp of localPlugins) {
-      if (lp.name === 'dsh-remote-connect') continue
+      if (lp.name === 'dsh-remote-ssh-connect') continue
       localByName.set(lp.name, lp)
     }
     const remoteByName = new Map()
     for (const rp of remotePlugins) {
-      if (rp.name === 'dsh-remote-connect') continue
+      if (rp.name === 'dsh-remote-ssh-connect') continue
       remoteByName.set(rp.name, rp)
     }
 

@@ -66,8 +66,8 @@ fi
 if [ -z "$PIDS" ] && command -v fuser >/dev/null 2>&1; then
   PIDS=$(fuser "$PORT/tcp" 2>/dev/null | tr ' ' '\\n' | grep -E '^[0-9]+$' | sort -u || true)
 fi
-if [ -z "$PIDS" ] && [ -f "$HOME/.dsh-remote-connect/run/dsh-$PORT.pid" ]; then
-  SAVED_PID=$(cat "$HOME/.dsh-remote-connect/run/dsh-$PORT.pid" 2>/dev/null || true)
+if [ -z "$PIDS" ] && [ -f "$HOME/.dsh-remote-ssh-connect/run/dsh-$PORT.pid" ]; then
+  SAVED_PID=$(cat "$HOME/.dsh-remote-ssh-connect/run/dsh-$PORT.pid" 2>/dev/null || true)
   if [ -n "$SAVED_PID" ] && kill -0 "$SAVED_PID" 2>/dev/null; then
     PIDS="$SAVED_PID"
   fi
@@ -87,15 +87,15 @@ for PID in $PIDS; do
     kill -KILL "$PID" 2>/dev/null || true
   fi
 done
-rm -f "$HOME/.dsh-remote-connect/run/dsh-$PORT.pid" 2>/dev/null || true
+rm -f "$HOME/.dsh-remote-ssh-connect/run/dsh-$PORT.pid" 2>/dev/null || true
 printf '%s\\n' '${EVENT_PREFIX}{"type":"kill_result","ok":true}'
 `
   const encoded = Buffer.from(script, 'utf8').toString('base64')
-  return `mkdir -p ~/.dsh-remote-connect && printf %s ${encoded} | base64 -d > ~/.dsh-remote-connect/.kill-$$.sh && exec sh ~/.dsh-remote-connect/.kill-$$.sh`
+  return `mkdir -p ~/.dsh-remote-ssh-connect && printf %s ${encoded} | base64 -d > ~/.dsh-remote-ssh-connect/.kill-$$.sh && exec sh ~/.dsh-remote-ssh-connect/.kill-$$.sh`
 }
 
 /**
- * Build the remote shell script that provisions Node.js and DSH under ~/.dsh-remote-connect,
+ * Build the remote shell script that provisions Node.js and DSH under ~/.dsh-remote-ssh-connect,
  * prunes old versions (> 3), checks port availability, initializes custom profiles if needed,
  * and supervises the remote DSH process tied to the SSH connection's stdin lifecycle.
  *
@@ -108,7 +108,7 @@ printf '%s\\n' '${EVENT_PREFIX}{"type":"kill_result","ok":true}'
  * @param {number} [options.nodeMajorMin] - Minimum Node major version (default 24).
  * @param {number} [options.nodeMinorMin] - Minimum Node minor version (default 9).
  * @param {string} [options.nodeFallbackVersion] - Node version to install if none suitable exists.
- * @param {boolean} [options.forceInstallNode] - Force installing Node into ~/.dsh-remote-connect/node.
+ * @param {boolean} [options.forceInstallNode] - Force installing Node into ~/.dsh-remote-ssh-connect/node.
  * @param {string} [options.customDshTarballUrl] - Optional tarball/package spec override for testing.
  * @returns {{ script: string, sshCommand: string }}
  */
@@ -378,7 +378,7 @@ function checkPortInUse(port) {
   void spawnDshChild(needsInit);
 
   const homeDir = process.env.HOME || '';
-  const baseDir = path.join(homeDir, '.dsh-remote-connect');
+  const baseDir = path.join(homeDir, '.dsh-remote-ssh-connect');
   const profileDir = path.join(dshHome, 'profiles', profile);
   const rpcChunks = new Map();
 
@@ -945,7 +945,7 @@ ${LOGIN_ENV_PREAMBLE}
 set -e
 
 PREFIX='${EVENT_PREFIX}'
-BASE_DIR="$HOME/.dsh-remote-connect"
+BASE_DIR="$HOME/.dsh-remote-ssh-connect"
 DSH_VERSION='${dshVersion}'
 VERSION_DIR="$BASE_DIR/$DSH_VERSION"
 REMOTE_PORT=${remotePort}
@@ -1146,7 +1146,7 @@ else
   mkdir -p "$STAGE_DIR"
   cat > "$STAGE_DIR/package.json" <<EOF
 {
-  "name": "dsh-remote-connect-runtime",
+  "name": "dsh-remote-ssh-connect-runtime",
   "private": true,
   "version": "1.0.0"
 }
@@ -1205,6 +1205,6 @@ exec "$SELECTED_NODE" "$SUPERVISOR_FILE"
 `.trim()
 
   const encodedScript = gzipSync(Buffer.from(script, 'utf8')).toString('base64')
-  const sshCommand = 'mkdir -p ~/.dsh-remote-connect && IFS= read -r B && printf %s "$B" | base64 -d | gzip -d > ~/.dsh-remote-connect/.boot-$$.sh && exec sh ~/.dsh-remote-connect/.boot-$$.sh'
+  const sshCommand = 'mkdir -p ~/.dsh-remote-ssh-connect && IFS= read -r B && printf %s "$B" | base64 -d | gzip -d > ~/.dsh-remote-ssh-connect/.boot-$$.sh && exec sh ~/.dsh-remote-ssh-connect/.boot-$$.sh'
   return { script, supervisorJs, encodedScript, sshCommand }
 }

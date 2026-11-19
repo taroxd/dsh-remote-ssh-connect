@@ -1,6 +1,6 @@
-# dsh-remote-connect
+# dsh-remote-ssh-connect
 
-Bilingual (`zh` / `en`) DeepSeek Harness (DSH) bundle plugin that adds the **SSH 连接** (**SSH connect**) management panel to the left navigation sidebar, connects to remote Linux hosts configured in `~/.ssh/config`, provisions matching Node.js and DSH versions under `~/.dsh-remote-connect/${DSH_VERSION}`, synchronizes local plugins to connected remote hosts, forwards local ports to the remote DSH Web server, and opens the mapped URL in the default browser.
+Bilingual (`zh` / `en`) DeepSeek Harness (DSH) bundle plugin that adds the **SSH 连接** (**SSH connect**) management panel to the left navigation sidebar, connects to remote Linux hosts configured in `~/.ssh/config`, provisions matching Node.js and DSH versions under `~/.dsh-remote-ssh-connect/${DSH_VERSION}`, synchronizes local plugins to connected remote hosts, forwards local ports to the remote DSH Web server, and opens the mapped URL in the default browser.
 
 ## Features
 
@@ -8,9 +8,9 @@ Bilingual (`zh` / `en`) DeepSeek Harness (DSH) bundle plugin that adds the **SSH
 - **Cross-platform local host (`win32` / `linux`) to remote Linux (`linux`)**: Uses OpenSSH with `SSH_ASKPASS` (`SSH_ASKPASS_REQUIRE=force`) to support default public-key/agent authentication as well as interactive password, OTP / 2FA (plain-text OTP input without hide toggle), and key-passphrase prompts; cancelling during authentication terminates the SSH connection immediately.
 - **`~/.ssh/config` discovery**: Parses `~/.ssh/config` and `Include` directives using VS Code Remote-SSH style rules, excluding wildcard (`*`, `?`) and negated (`!`) patterns from the host list while still applying matching `Host` block options in OpenSSH first-wins order.
 - **Isolated versioned remote installation**:
-  - Installs the exact local DSH version into `~/.dsh-remote-connect/${DSH_VERSION}` on the remote Linux host (skipping installation when already present).
-  - Automatically retains at most 3 installed DSH versions under `~/.dsh-remote-connect`, pruning the oldest versions first.
-  - Detects or installs a compatible Node.js (`>=24.9.0`) runtime under `~/.dsh-remote-connect/node` when the remote machine lacks one.
+  - Installs the exact local DSH version into `~/.dsh-remote-ssh-connect/${DSH_VERSION}` on the remote Linux host (skipping installation when already present).
+  - Automatically retains at most 3 installed DSH versions under `~/.dsh-remote-ssh-connect`, pruning the oldest versions first.
+  - Detects or installs a compatible Node.js (`>=24.9.0`) runtime under `~/.dsh-remote-ssh-connect/node` when the remote machine lacks one.
 - **Local-to-remote plugin synchronization**:
   - Syncs any user-installed local plugin to a connected remote host using the same installation method (`npm` source, `GitHub` source, or `local` directory/tarball source).
   - When the plugin is already installed on the remote host at a version `<=` the local version, automatically removes and reinstalls it; when the remote version is higher than the local version, prompts for confirmation before removing and reinstalling.

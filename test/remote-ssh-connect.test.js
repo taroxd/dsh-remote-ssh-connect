@@ -1,4 +1,4 @@
-// Unit and integration tests for dsh-remote-connect using strictly synthetic RFC 5737 test fixtures.
+// Unit and integration tests for dsh-remote-ssh-connect using strictly synthetic RFC 5737 test fixtures.
 
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -183,14 +183,14 @@ Match host 203.0.113.*
     assert.equal(script.includes('.bashrc'), true)
     assert.equal(typeof encodedScript, 'string')
     assert.ok(encodedScript.length > 100)
-    assert.equal(sshCommand.startsWith('mkdir -p ~/.dsh-remote-connect && IFS= read -r B'), true)
+    assert.equal(sshCommand.startsWith('mkdir -p ~/.dsh-remote-ssh-connect && IFS= read -r B'), true)
     assert.ok(sshCommand.length < 250, 'sshCommand must stay compact to avoid ENAMETOOLONG on Windows')
 
     const { Script } = await import('node:vm')
     assert.doesNotThrow(() => new Script(supervisorJs), 'supervisorJs must be valid JavaScript syntax')
 
     const killCmd = buildKillRemotePortScript(3080)
-    assert.equal(killCmd.startsWith('mkdir -p ~/.dsh-remote-connect && printf %s '), true)
+    assert.equal(killCmd.startsWith('mkdir -p ~/.dsh-remote-ssh-connect && printf %s '), true)
   }
 
   // 6. Browser opener & fallback URL support
@@ -936,10 +936,10 @@ Match host 203.0.113.*
         JSON.stringify({
           name: 'dsh-profile-ws',
           private: true,
-          dsh: { profile: { bundles: ['local-only-plugin', 'dsh-remote-connect'] } },
+          dsh: { profile: { bundles: ['local-only-plugin', 'dsh-remote-ssh-connect'] } },
           dependencies: {
             'local-only-plugin': '1.0.0',
-            'dsh-remote-connect': '1.0.0',
+            'dsh-remote-ssh-connect': '1.0.0',
           },
         }),
         'utf8',
@@ -1235,7 +1235,7 @@ Match host 203.0.113.*
         // Connect to ws-box
         await manager.connectHost('ws-box', { waitForReady: true })
 
-        // 1. List remote workspaces & verify plugin diffing (local-only-plugin vs remote-only-plugin, dsh-remote-connect excluded)
+        // 1. List remote workspaces & verify plugin diffing (local-only-plugin vs remote-only-plugin, dsh-remote-ssh-connect excluded)
         const remoteWsRes = await manager.listRemoteWorkspaces('ws-box')
         assert.equal(remoteWsRes.workspaces.length, 2)
         assert.equal(remoteWsRes.workspaces[0].remoteWorkspaceId, 'rws-alpha')
@@ -1481,7 +1481,7 @@ Match host 203.0.113.*
       const fn = new Function(clientCode)
       fn()
       assert.ok(registeredModule, 'client.js must register with window.__ModuleLoader__.load')
-      assert.equal(registeredModule.id, 'dsh-remote-connect')
+      assert.equal(registeredModule.id, 'dsh-remote-ssh-connect')
       assert.equal(typeof registeredModule.factory, 'function')
 
       const mockReact = {

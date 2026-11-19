@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "SSH 远端连接",
-    "description": "在左侧导航栏增加「SSH 连接」面板，读取 ~/.ssh/config 中的主机列表，通过 SSH 长连接在远端 Linux 主机的 ~/.dsh-remote-connect 下自动部署同版本 DSH 与所需 Node.js 环境，支持端口映射、密码/OTP 交互认证、端口占用检测、本地插件同步安装，并可将远程工作区及会话同步至左侧独立的「远程工作区」区域直接操控。",
+    "description": "在左侧导航栏增加「SSH 连接」面板，读取 ~/.ssh/config 中的主机列表，通过 SSH 长连接在远端 Linux 主机的 ~/.dsh-remote-ssh-connect 下自动部署同版本 DSH 与所需 Node.js 环境，支持端口映射、密码/OTP 交互认证、端口占用检测、本地插件同步安装，并可将远程工作区及会话同步至左侧独立的「远程工作区」区域直接操控。",
     "detail": "docs/DETAIL.zh.md"
   }
 }

@@ -1,4 +1,4 @@
-// Client half of dsh-remote-connect:
+// Client half of dsh-remote-ssh-connect:
 // 1. Registers "SSH 连接" / "SSH connect" in the left navigation sidebar and renders the SSH Management Panel.
 // 2. Supports listing and synchronizing remote workspaces into the local DSH sidebar, with persistent non-blocking plugin diff hints.
 // 3. Renders a dedicated "Remote Workspaces" ("远程工作区") section in the left sidebar right above "Workspaces",
@@ -7,7 +7,7 @@
 // Uses only official --dsw-alias-* theme tokens and React (no private primitive imports).
 
 window.__ModuleLoader__.load({
-  id: 'dsh-remote-connect',
+  id: 'dsh-remote-ssh-connect',
   factory(require) {
     const React = require('react')
     let ReactDOM = null
@@ -16,11 +16,11 @@ window.__ModuleLoader__.load({
     } catch {}
     const h = React.createElement
 
-    const NS = 'dshRemoteConnect'
-    const PANEL_ID = 'remote-connect'
+    const NS = 'dshRemoteSshConnect'
+    const PANEL_ID = 'remote-ssh-connect'
     const REMOTE_WS_PREFIX = 'remote:'
     const CORDIS_ORIGINAL = Symbol.for('cordis.original')
-    const DISMISSED_DIFF_STORAGE_KEY = 'dsh.remoteConnect.dismissedPluginDiffs'
+    const DISMISSED_DIFF_STORAGE_KEY = 'dsh.remoteSshConnect.dismissedPluginDiffs'
 
     function unwrapCordisService(svc) {
       if (!svc || typeof svc !== 'object') return svc
@@ -106,9 +106,9 @@ window.__ModuleLoader__.load({
       phase_awaiting_auth: '等待输入密码 / OTP 认证信息…',
       phase_checking_port: '正在检查远端端口占用情况…',
       phase_checking_node: '正在检查远端 Node.js 与 npm 环境…',
-      phase_installing_node: '正在安装 Node.js 到 ~/.dsh-remote-connect/node…',
-      phase_checking_dsh: '正在检查远端 ~/.dsh-remote-connect/{version}…',
-      phase_installing_dsh: '正在安装 DSH {version} 到 ~/.dsh-remote-connect/{version}…',
+      phase_installing_node: '正在安装 Node.js 到 ~/.dsh-remote-ssh-connect/node…',
+      phase_checking_dsh: '正在检查远端 ~/.dsh-remote-ssh-connect/{version}…',
+      phase_installing_dsh: '正在安装 DSH {version} 到 ~/.dsh-remote-ssh-connect/{version}…',
       phase_starting_dsh: '正在启动远端 DSH 服务…',
       phase_ready: '远端 DSH 运行中',
 
@@ -263,9 +263,9 @@ window.__ModuleLoader__.load({
       phase_awaiting_auth: 'Waiting for password / OTP authentication…',
       phase_checking_port: 'Checking remote port availability…',
       phase_checking_node: 'Checking remote Node.js and npm…',
-      phase_installing_node: 'Installing Node.js into ~/.dsh-remote-connect/node…',
-      phase_checking_dsh: 'Checking ~/.dsh-remote-connect/{version}…',
-      phase_installing_dsh: 'Installing DSH {version} into ~/.dsh-remote-connect/{version}…',
+      phase_installing_node: 'Installing Node.js into ~/.dsh-remote-ssh-connect/node…',
+      phase_checking_dsh: 'Checking ~/.dsh-remote-ssh-connect/{version}…',
+      phase_installing_dsh: 'Installing DSH {version} into ~/.dsh-remote-ssh-connect/{version}…',
       phase_starting_dsh: 'Starting remote DSH service…',
       phase_ready: 'Remote DSH is running',
 
@@ -1189,7 +1189,7 @@ window.__ModuleLoader__.load({
 `
 
     async function callHost(op, payload) {
-      const response = await fetch(new URL(`api/remote-connect/${op}`, document.baseURI).href, {
+      const response = await fetch(new URL(`api/remote-ssh-connect/${op}`, document.baseURI).href, {
         method: 'POST',
         credentials: 'include',
         headers: { 'content-type': 'application/json' },
@@ -2236,7 +2236,7 @@ window.__ModuleLoader__.load({
           de: en,
           ru: en,
           pt: en,
-        }), 'remote-connect: locale')
+        }), 'remote-ssh-connect: locale')
 
         const t = ctx.locale.bind(NS)
 
@@ -2545,7 +2545,7 @@ window.__ModuleLoader__.load({
             if (origOpenWorkspace) uiWs.openWorkspace = origOpenWorkspace
             if (origConnectWorkspace) uiWs.connectWorkspace = origConnectWorkspace
           }
-        }, 'remote-connect: uiWorkspace intercept')
+        }, 'remote-ssh-connect: uiWorkspace intercept')
 
         /**
          * Ensure the DOM mount node `#dsh-rc-remote-workspaces-mount` exists right above `[data-slot="sidebar.workspaces"]`
@@ -3193,7 +3193,7 @@ window.__ModuleLoader__.load({
           }, [])
 
           const firstInvalidated = sharedState.invalidatedWorkspaces[0] || null
-          const isSshPageMounted = typeof document !== 'undefined' && Boolean(document.querySelector('[data-dsh-remote-connect-page]'))
+          const isSshPageMounted = typeof document !== 'undefined' && Boolean(document.querySelector('[data-dsh-remote-ssh-connect-page]'))
           const sidebarAuthPrompt = !isSshPageMounted ? (sharedState.authPrompts[0] || null) : null
 
           const handleAckInvalidWorkspace = async (localWorkspaceId) => {
@@ -3430,7 +3430,7 @@ window.__ModuleLoader__.load({
 
           const connectedCount = data.hosts.filter((hItem) => hItem.status === 'connected').length
 
-          return h('div', { className: 'dsh-rc-page', 'data-dsh-remote-connect-page': '' },
+          return h('div', { className: 'dsh-rc-page', 'data-dsh-remote-ssh-connect-page': '' },
             h('div', { className: 'dsh-rc-container' },
               h('header', { className: 'dsh-rc-header' },
                 h('div', { className: 'dsh-rc-heading' },
@@ -3501,23 +3501,23 @@ window.__ModuleLoader__.load({
 
         ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
           name: 'shell.overlay',
-          id: 'remote-connect.overlay',
+          id: 'remote-ssh-connect.overlay',
           order: 90,
           locale: NS,
-        }, RemoteConnectShellOverlay)), 'remote-connect: shell overlay')
+        }, RemoteConnectShellOverlay)), 'remote-ssh-connect: shell overlay')
 
         ctx.effect(() => ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
           name: 'conversation.session.header.actions',
-          id: 'remote-connect.session-badge',
+          id: 'remote-ssh-connect.session-badge',
           order: 50,
           locale: NS,
-        }, RemoteSessionHeaderAction)), 'remote-connect: session header badge')
+        }, RemoteSessionHeaderAction)), 'remote-ssh-connect: session header badge')
 
         ctx.effect(() => ctx.slots.inject('main', () => ctx.slots.register({
           name: 'main',
           key: PANEL_ID,
           locale: NS,
-        }, RemoteConnectPage)), 'remote-connect: main panel')
+        }, RemoteConnectPage)), 'remote-ssh-connect: main panel')
 
         ctx.effect(() => ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({
           name: 'sidebar.panellist',
@@ -3525,7 +3525,7 @@ window.__ModuleLoader__.load({
           order: 15,
           label: () => t('panel'),
           locale: NS,
-        }, SshPanelIcon)), 'remote-connect: sidebar entry')
+        }, SshPanelIcon)), 'remote-ssh-connect: sidebar entry')
       },
     }
   },

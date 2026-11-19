@@ -164,7 +164,7 @@ export class AskpassCoordinator {
       env: {
         SSH_ASKPASS: this.launcherPath,
         SSH_ASKPASS_REQUIRE: 'force',
-        DISPLAY: process.env.DISPLAY || 'dsh-remote-connect:0',
+        DISPLAY: process.env.DISPLAY || 'dsh-remote-ssh-connect:0',
         DSH_RC_NODE_EXEC: process.execPath,
         DSH_RC_ASKPASS_SCRIPT: HELPER_SCRIPT_PATH,
         DSH_RC_ASKPASS_URL: `http://127.0.0.1:${this.port}/askpass`,
