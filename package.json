@@ -3,6 +3,18 @@
   "version": "1.0.0",
   "type": "module",
   "description": "Connect to remote Linux hosts over SSH, provision matching DSH versions in ~/.dsh-remote-connect, sync local plugins and remote workspaces into a dedicated Remote Workspaces sidebar section, and forward ports for local browser access.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taroxd/dsh-remote-connect.git"
+  },
+  "homepage": "https://github.com/taroxd/dsh-remote-connect#readme",
+  "bugs": {
+    "url": "https://github.com/taroxd/dsh-remote-connect/issues"
+  },
+  "engines": {
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
   "icon": "./icon.svg",
   "scripts": {
     "test": "node --test test/remote-connect.test.js"
@@ -20,8 +32,13 @@
     "cordis.patch.yml",
     "locale/*.json",
     "docs",
-    "icon.svg"
+    "icon.svg",
+    "README.md",
+    "LICENSE"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
