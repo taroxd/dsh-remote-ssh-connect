@@ -63,11 +63,7 @@ export function normalizeSyncedWorkspaceRecord(raw = {}) {
     : makeLocalWorkspaceId(host, remoteWorkspaceId)
   const remotePath = String(raw.remotePath ?? raw.path ?? '/').trim() || '/'
   const defaultTitle = remotePath.split(/[\\/]/).filter(Boolean).pop() || remotePath
-  let title = String(raw.title ?? '').trim() || defaultTitle
-  const hostSuffix = ` (${host})`
-  while (title.endsWith(`${hostSuffix}${hostSuffix}`)) {
-    title = title.slice(0, -hostSuffix.length)
-  }
+  const title = String(raw.title ?? '').trim() || defaultTitle
   const nowIso = new Date().toISOString()
   const createdAt = typeof raw.createdAt === 'string' && raw.createdAt.trim() ? raw.createdAt.trim() : nowIso
   const updatedAt = typeof raw.updatedAt === 'string' && raw.updatedAt.trim() ? raw.updatedAt.trim() : createdAt
@@ -183,9 +179,20 @@ export class MinimalWsClient extends EventEmitter {
       this.socket = socket
       this.readyState = 1
       socket.setNoDelay(true)
+      socket.setKeepAlive?.(true, 15_000)
+      this._pingTimer = setInterval(() => {
+        if (this.readyState === 1) {
+          this._sendFrame(0x09, Buffer.alloc(0))
+        }
+      }, 20_000)
+      this._pingTimer.unref?.()
       socket.on('data', (chunk) => this._onData(chunk))
       socket.on('error', (err) => this.emit('error', err))
       socket.on('close', () => {
+        if (this._pingTimer) {
+          clearInterval(this._pingTimer)
+          this._pingTimer = null
+        }
         if (this.readyState !== 3) {
           this.readyState = 3
           this.emit('close', 1006, '')
@@ -352,6 +359,10 @@ export class MinimalWsClient extends EventEmitter {
   }
 
   close(code = 1000, reason = '') {
+    if (this._pingTimer) {
+      clearInterval(this._pingTimer)
+      this._pingTimer = null
+    }
     if (this.readyState === 3) return
     if (this.readyState === 1) {
       this.readyState = 2
@@ -1576,11 +1587,9 @@ export class RemoteWorkspaceBridge {
     }
 
     const localWorkspaceId = makeLocalWorkspaceId(hostKey, remoteWs.workspaceId)
-    const hostSuffix = ` (${hostKey})`
-    const rawRemoteTitle = String(remoteWs.title || '').trim()
     const displayTitle = options.title
       ? String(options.title).trim()
-      : (rawRemoteTitle.endsWith(hostSuffix) ? rawRemoteTitle : `${rawRemoteTitle}${hostSuffix}`)
+      : String(remoteWs.title || '').trim()
 
     const record = normalizeSyncedWorkspaceRecord({
       localWorkspaceId,

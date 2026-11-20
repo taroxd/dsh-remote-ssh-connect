@@ -90,7 +90,8 @@ done
 rm -f "$HOME/.dsh-remote-ssh-connect/run/dsh-$PORT.pid" 2>/dev/null || true
 printf '%s\\n' '${EVENT_PREFIX}{"type":"kill_result","ok":true}'
 `
-  const encoded = Buffer.from(script, 'utf8').toString('base64')
+  const normalized = script.replace(/\r\n/g, '\n')
+  const encoded = Buffer.from(normalized, 'utf8').toString('base64')
   return `mkdir -p ~/.dsh-remote-ssh-connect && printf %s ${encoded} | base64 -d > ~/.dsh-remote-ssh-connect/.kill-$$.sh && exec sh ~/.dsh-remote-ssh-connect/.kill-$$.sh`
 }
 
@@ -144,7 +145,7 @@ export function buildRemoteBootstrapScript(options) {
 
   // Supervisor script run by Node on the remote host once Node & DSH are ready.
   const supervisorJs = `
-const { spawn } = require('node:child_process');
+const { spawn, execSync } = require('node:child_process');
 const fs = require('node:fs');
 const net = require('node:net');
 const path = require('node:path');
@@ -152,6 +153,8 @@ const readline = require('node:readline');
 const zlib = require('node:zlib');
 
 try { fs.unlinkSync(__filename); } catch {}
+process.stdout.on('error', () => {});
+process.stderr.on('error', () => {});
 
 const PREFIX = ${JSON.stringify(EVENT_PREFIX)};
 const dshBin = process.env.DSH_RC_BIN;
@@ -163,10 +166,30 @@ const pidFile = process.env.DSH_RC_PID_FILE;
 const shippedProfiles = new Set(['web', 'acp', 'headless', 'sdk', 'sdk-minimal', 'desktop']);
 
 function emit(obj) {
-  process.stdout.write(PREFIX + JSON.stringify(obj) + '\\n');
+  try {
+    if (process.stdout.writable && !process.stdout.destroyed) {
+      process.stdout.write(PREFIX + JSON.stringify(obj) + '\\n');
+    }
+  } catch {}
 }
 
-function checkPortInUse(port) {
+function canBindPort(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', (err) => {
+      if (err && (err.code === 'EADDRINUSE' || err.code === 'EACCES')) {
+        resolve(false);
+      } else {
+        resolve(true);
+      }
+    });
+    srv.listen(port, '127.0.0.1', () => {
+      srv.close(() => resolve(true));
+    });
+  });
+}
+
+function canConnectPort(port) {
   return new Promise((resolve) => {
     const socket = net.createConnection({ host: '127.0.0.1', port });
     const timer = setTimeout(() => {
@@ -185,10 +208,62 @@ function checkPortInUse(port) {
   });
 }
 
+async function checkPortInUse(port) {
+  const bindable = await canBindPort(port);
+  if (!bindable) return true;
+  return await canConnectPort(port);
+}
+
+function detectPortOccupant(port) {
+  let pid = null;
+  let command = null;
+  try {
+    const ssOut = execSync('ss -tlnp 2>/dev/null || true', { encoding: 'utf8', timeout: 3000 });
+    for (const line of ssOut.split(/\\r?\\n/)) {
+      if (new RegExp(':' + String(port) + '(?:\\\\b|\\\\s|$)').test(line)) {
+        const m = /pid=(\\d+)/.exec(line);
+        if (m) {
+          pid = Number(m[1]);
+          break;
+        }
+      }
+    }
+  } catch {}
+  if (!pid) {
+    try {
+      const lsofOut = execSync('lsof -nP -t -iTCP:' + String(port) + ' -sTCP:LISTEN 2>/dev/null || true', { encoding: 'utf8', timeout: 3000 }).trim();
+      const first = lsofOut.split(/\\s+/)[0];
+      if (/^\\d+$/.test(first)) pid = Number(first);
+    } catch {}
+  }
+  if (!pid && pidFile && fs.existsSync(pidFile)) {
+    try {
+      const saved = Number(fs.readFileSync(pidFile, 'utf8').trim());
+      if (Number.isInteger(saved) && saved > 0) {
+        process.kill(saved, 0);
+        pid = saved;
+      }
+    } catch {}
+  }
+  if (pid) {
+    try {
+      const rawCmd = fs.readFileSync('/proc/' + String(pid) + '/cmdline', 'utf8');
+      command = rawCmd.replace(/[\\x00\\r\\n]+/g, ' ').trim().slice(0, 200) || null;
+    } catch {}
+  }
+  return { pid, command };
+}
+
 (async () => {
   const inUse = await checkPortInUse(remotePort);
   if (inUse) {
-    emit({ type: 'port_in_use', port: remotePort });
+    const occ = detectPortOccupant(remotePort);
+    emit({
+      type: 'port_in_use',
+      port: remotePort,
+      ...(occ.pid ? { pid: occ.pid } : {}),
+      ...(occ.command ? { command: occ.command } : {}),
+    });
     process.exit(42);
   }
 
@@ -230,6 +305,8 @@ function checkPortInUse(port) {
   let remoteLaunchToken = null;
   let remoteAuthCookie = null;
   let rpcCallSeq = 0;
+  let lastPingAt = Date.now();
+  const initialPpid = process.ppid;
 
   function cleanupPidFile() {
     if (pidFile) {
@@ -237,27 +314,80 @@ function checkPortInUse(port) {
     }
   }
 
+  function forceKillChildSync() {
+    if (child && child.pid) {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      try { child.kill('SIGKILL'); } catch {}
+    }
+    cleanupPidFile();
+  }
+
+  process.on('exit', () => {
+    forceKillChildSync();
+  });
+
   function terminateChild(reason) {
     if (shuttingDown) return;
     shuttingDown = true;
-    emit({ type: 'stopping', reason });
     if (child && child.pid && child.exitCode === null) {
       try { process.kill(-child.pid, 'SIGTERM'); } catch {}
       try { child.kill('SIGTERM'); } catch {}
+      emit({ type: 'stopping', reason });
       setTimeout(() => {
-        if (child && child.exitCode === null) {
-          try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-          try { child.kill('SIGKILL'); } catch {}
-        }
-        cleanupPidFile();
+        forceKillChildSync();
         emit({ type: 'stopped', reason });
         process.exit(0);
-      }, 2000).unref();
+      }, 800);
     } else {
       cleanupPidFile();
       emit({ type: 'stopped', reason });
       process.exit(0);
     }
+  }
+
+  const watchdogTimer = setInterval(() => {
+    if (
+      process.ppid === 1 ||
+      (initialPpid > 1 && process.ppid !== initialPpid) ||
+      process.stdin.destroyed ||
+      process.stdin.readableEnded ||
+      Date.now() - lastPingAt > 45_000
+    ) {
+      clearInterval(watchdogTimer);
+      terminateChild('ssh_connection_lost');
+    }
+  }, 2000);
+  watchdogTimer.unref();
+
+  const dshInstallDir = path.dirname(path.dirname(dshBin));
+  process.env.DSH_INSTALL_DIR = dshInstallDir;
+
+  async function recoverIdlePlugins() {
+    try {
+      const [bundlesRes, pluginsRes] = await Promise.all([
+        callRemotePluginManager('listBundles', {}, 10_000),
+        callRemotePluginManager('listPlugins', {}, 10_000),
+      ]);
+      const bundles = (bundlesRes && bundlesRes.ok && Array.isArray(bundlesRes.value)) ? bundlesRes.value : [];
+      const plugins = (pluginsRes && pluginsRes.ok && Array.isArray(pluginsRes.value)) ? pluginsRes.value : [];
+      const pluginsById = new Map();
+      for (const p of plugins) {
+        if (p && typeof p.entryId === 'string') pluginsById.set(p.entryId, p);
+        if (p && typeof p.patchId === 'string') pluginsById.set(p.patchId, p);
+      }
+      for (const b of bundles) {
+        if (!b || !b.enabled || !b.installed || b.official) continue;
+        const rows = Array.isArray(b.rows) ? b.rows : [];
+        const needsRecovery = rows.some((r) => {
+          const live = pluginsById.get(r.entryId) || pluginsById.get(r.rowId);
+          return !live || (live.enabled && (live.fiberPhase === null || live.fiberPhase === 'failed'));
+        });
+        if (needsRecovery) {
+          await callRemotePluginManager('setBundleEnabled', { name: b.name, enabled: false }, 15_000);
+          await callRemotePluginManager('setBundleEnabled', { name: b.name, enabled: true }, 15_000);
+        }
+      }
+    } catch {}
   }
 
   function spawnDshChild(withInitFlag) {
@@ -272,6 +402,7 @@ function checkPortInUse(port) {
         detached: true,
         env: {
           ...process.env,
+          DSH_INSTALL_DIR: dshInstallDir,
           NO_COLOR: '1',
         },
       });
@@ -284,11 +415,29 @@ function checkPortInUse(port) {
         } catch {}
       }
 
+      const startupTimeout = setTimeout(async () => {
+        if (settledReady || shuttingDown) return;
+        const occ = detectPortOccupant(remotePort);
+        if (occ.pid && occ.pid !== proc.pid) {
+          settledReady = true;
+          emit({
+            type: 'port_in_use',
+            port: remotePort,
+            pid: occ.pid,
+            ...(occ.command ? { command: occ.command } : {}),
+          });
+          forceKillChildSync();
+          process.exit(42);
+        }
+      }, 20_000);
+      startupTimeout.unref();
+
       function onLine(line, streamName) {
         const trimmed = line.trim();
         if (!trimmed) return;
         const urlMatch = /^dsh web:\\s*(https?:\\/\\/\\S+)/i.exec(trimmed);
         if (urlMatch) {
+          clearTimeout(startupTimeout);
           let finalUrl = urlMatch[1];
           try {
             const parsed = new URL(finalUrl);
@@ -302,25 +451,41 @@ function checkPortInUse(port) {
             parsed.port = String(localPort);
             finalUrl = parsed.href;
           } catch {}
-          readyEmitted = true;
-          emit({
-            type: 'ready',
-            url: finalUrl,
-            remotePort,
-            localPort,
-            profile,
-            version: dshVersion,
-            pid: proc.pid,
-            initializedFromWeb: needsInit,
+          Promise.resolve(recoverIdlePlugins()).finally(() => {
+            readyEmitted = true;
+            emit({
+              type: 'ready',
+              url: finalUrl,
+              remotePort,
+              localPort,
+              profile,
+              version: dshVersion,
+              pid: proc.pid,
+              initializedFromWeb: needsInit,
+            });
+            if (!settledReady) {
+              settledReady = true;
+              resolveReady(true);
+            }
           });
-          if (!settledReady) {
-            settledReady = true;
-            resolveReady(true);
-          }
           return;
         }
         if (/EADDRINUSE|address already in use/i.test(trimmed)) {
-          emit({ type: 'port_in_use', port: remotePort, detail: trimmed });
+          clearTimeout(startupTimeout);
+          const occ = detectPortOccupant(remotePort);
+          const occPid = (occ.pid && occ.pid !== proc.pid) ? occ.pid : null;
+          emit({
+            type: 'port_in_use',
+            port: remotePort,
+            ...(occPid ? { pid: occPid } : {}),
+            ...(occPid && occ.command ? { command: occ.command } : {}),
+            detail: trimmed,
+          });
+          if (!restartingChild) {
+            forceKillChildSync();
+            process.exit(42);
+          }
+          return;
         }
         emit({ type: 'log', stream: streamName, line: trimmed });
       }
@@ -329,6 +494,7 @@ function checkPortInUse(port) {
       readline.createInterface({ input: proc.stderr }).on('line', (l) => onLine(l, 'stderr'));
 
       proc.on('exit', (code, signal) => {
+        clearTimeout(startupTimeout);
         if (!settledReady) {
           settledReady = true;
           resolveReady(false);
@@ -702,7 +868,7 @@ function checkPortInUse(port) {
             }
           } catch {}
         }
-        targetSpec = (localLinkPrefix === 'file' ? 'file:' : 'link:') + destDir;
+        targetSpec = 'file:' + destDir;
       }
     }
 
@@ -831,6 +997,15 @@ function checkPortInUse(port) {
         throw new Error(errOut);
       }
 
+      if (remoteLaunchToken) {
+        const enableRes = await callRemotePluginManager('setBundleEnabled', { name: pkgName, enabled: true });
+        if (!enableRes || !enableRes.ok || !enableRes.value || enableRes.value.application === 'restart-required' || enableRes.value.application === 'failed') {
+          needsRestart = true;
+        } else {
+          installedViaApi = true;
+        }
+      }
+
       if (fs.existsSync(profileManifestPath)) {
         try {
           const pm = JSON.parse(fs.readFileSync(profileManifestPath, 'utf8'));
@@ -841,17 +1016,9 @@ function checkPortInUse(port) {
             bundles.push(pkgName);
             pm.dsh.profile.bundles = bundles;
             fs.writeFileSync(profileManifestPath, JSON.stringify(pm, null, 2) + '\\n');
+            needsRestart = true;
           }
         } catch {}
-      }
-
-      if (remoteLaunchToken) {
-        const enableRes = await callRemotePluginManager('setBundleEnabled', { name: pkgName, enabled: true });
-        if (!enableRes || !enableRes.ok || !enableRes.value || enableRes.value.application === 'restart-required' || enableRes.value.application === 'failed') {
-          needsRestart = true;
-        } else {
-          installedViaApi = true;
-        }
       }
     }
 
@@ -886,7 +1053,8 @@ function checkPortInUse(port) {
       return;
     }
     if (cmd === 'PING') {
-      emit({ type: 'pong', ts: Date.now() });
+      lastPingAt = Date.now();
+      emit({ type: 'pong', ts: lastPingAt });
       return;
     }
     if (cmd.startsWith('RPC_CHUNK:')) {
@@ -965,14 +1133,22 @@ emit_json() {
 check_port_conflict() {
   OCCUPANT_PID=""
   OCCUPANT_CMD=""
+  SS_OUT=""
   if command -v ss >/dev/null 2>&1; then
-    SS_OUT=$(ss -tlnH "sport = :$REMOTE_PORT" 2>/dev/null || true)
-    if [ -n "$SS_OUT" ]; then
-      SS_PROC=$(ss -tlnpH "sport = :$REMOTE_PORT" 2>/dev/null || true)
+    SS_PROC=$(ss -tlnp 2>/dev/null | grep -E ":$REMOTE_PORT[[:space:]]" || true)
+    if [ -n "$SS_PROC" ]; then
+      SS_OUT="listening"
       OCCUPANT_PID=$(printf '%s\\n' "$SS_PROC" | sed -n 's/.*pid=\\([0-9][0-9]*\\).*/\\1/p' | head -n 1)
     fi
-  elif command -v lsof >/dev/null 2>&1; then
+  fi
+  if [ -z "$SS_OUT" ] && command -v lsof >/dev/null 2>&1; then
     OCCUPANT_PID=$(lsof -t -iTCP:"$REMOTE_PORT" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)
+    if [ -n "$OCCUPANT_PID" ]; then
+      SS_OUT="listening"
+    fi
+  fi
+  if [ -z "$SS_OUT" ] && command -v fuser >/dev/null 2>&1; then
+    OCCUPANT_PID=$(fuser "$REMOTE_PORT/tcp" 2>/dev/null | tr ' ' '\\n' | grep -E '^[0-9]+$' | head -n 1 || true)
     if [ -n "$OCCUPANT_PID" ]; then
       SS_OUT="listening"
     fi
@@ -1190,6 +1366,7 @@ fi
 
 prune_old_versions
 
+export DSH_INSTALL_DIR="$VERSION_DIR/node_modules/@deepseek-ai/dsh"
 export DSH_RC_BIN="$DSH_BIN"
 export DSH_RC_VERSION="$DSH_VERSION"
 export DSH_RC_PROFILE="$PROFILE_NAME"
@@ -1204,7 +1381,9 @@ DSH_RC_SUPERVISOR_EOF
 exec "$SELECTED_NODE" "$SUPERVISOR_FILE"
 `.trim()
 
-  const encodedScript = gzipSync(Buffer.from(script, 'utf8')).toString('base64')
+  const normalizedSupervisor = supervisorJs.replace(/\r\n/g, '\n')
+  const normalizedScript = script.replace(/\r\n/g, '\n')
+  const encodedScript = gzipSync(Buffer.from(normalizedScript, 'utf8')).toString('base64')
   const sshCommand = 'mkdir -p ~/.dsh-remote-ssh-connect && IFS= read -r B && printf %s "$B" | base64 -d | gzip -d > ~/.dsh-remote-ssh-connect/.boot-$$.sh && exec sh ~/.dsh-remote-ssh-connect/.boot-$$.sh'
-  return { script, supervisorJs, encodedScript, sshCommand }
+  return { script: normalizedScript, supervisorJs: normalizedSupervisor, encodedScript, sshCommand }
 }

@@ -446,8 +446,8 @@ export class RemoteConnectionManager {
       '-o', 'BatchMode=no',
       '-o', 'StrictHostKeyChecking=accept-new',
       '-o', 'ExitOnForwardFailure=yes',
-      '-o', 'ServerAliveInterval=15',
-      '-o', 'ServerAliveCountMax=3',
+      '-o', 'ServerAliveInterval=10',
+      '-o', 'ServerAliveCountMax=6',
       '-o', 'TCPKeepAlive=yes',
       '-o', 'ConnectTimeout=20',
       '-L', `127.0.0.1:${allocatedLocalPort}:127.0.0.1:${cfg.remotePort}`,
@@ -484,6 +484,14 @@ export class RemoteConnectionManager {
     if (child.stdin?.writable && encodedScript) {
       child.stdin.write(`${encodedScript}\n`)
     }
+    session.keepaliveTimer = setInterval(() => {
+      if (session.child && !session.child.killed && session.child.stdin?.writable) {
+        try {
+          session.child.stdin.write('PING\n', () => {})
+        } catch {}
+      }
+    }, 15_000)
+    session.keepaliveTimer.unref?.()
 
     const handleEvent = (ev) => {
       if (!ev || typeof ev !== 'object') return
@@ -519,6 +527,11 @@ export class RemoteConnectionManager {
           message: `Remote port ${port} is already in use${pid ? ` (PID ${pid}${command ? `: ${command}` : ''})` : ''}. Terminate the occupying process or choose another remote port.`,
         }
         resolveReady(session)
+        setTimeout(() => {
+          try {
+            if (child && child.exitCode === null && !child.killed) child.kill('SIGTERM')
+          } catch {}
+        }, 300).unref?.()
         return
       }
       if (ev.type === 'ready') {
@@ -531,14 +544,6 @@ export class RemoteConnectionManager {
         if (typeof ev.initializedFromWeb === 'boolean') {
           session.initializedFromWeb = ev.initializedFromWeb
         }
-        // Start periodic application-level heartbeat over stdin
-        if (session.keepaliveTimer) clearInterval(session.keepaliveTimer)
-        session.keepaliveTimer = setInterval(() => {
-          if (session.child && !session.child.killed && session.child.stdin?.writable) {
-            session.child.stdin.write('PING\n', () => {})
-          }
-        }, 25_000)
-        session.keepaliveTimer.unref?.()
         Promise.resolve(this.workspaceBridge.onHostConnected(hostKey, session.url))
           .catch(() => {})
           .finally(() => {
@@ -555,6 +560,11 @@ export class RemoteConnectionManager {
           message: ev.message || 'Remote bootstrap error',
         }
         resolveReady(session)
+        setTimeout(() => {
+          try {
+            if (child && child.exitCode === null && !child.killed) child.kill('SIGTERM')
+          } catch {}
+        }, 300).unref?.()
         return
       }
       if (ev.type === 'rpc_result' && ev.id) {
@@ -710,7 +720,7 @@ export class RemoteConnectionManager {
             } catch {}
             resolve()
           }, 500)
-        }, 2000)
+        }, 3000)
 
         child.once('close', () => {
           clearTimeout(timer)
@@ -720,7 +730,11 @@ export class RemoteConnectionManager {
         try {
           if (child.stdin?.writable) {
             child.stdin.write('SHUTDOWN\n')
-            child.stdin.end()
+            setTimeout(() => {
+              try {
+                if (child.stdin?.writable) child.stdin.end()
+              } catch {}
+            }, 300).unref?.()
           } else {
             child.kill('SIGTERM')
           }

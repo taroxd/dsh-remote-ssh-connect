@@ -594,7 +594,7 @@ if (sourceKind === 'local') {
         }
       } catch {}
     }
-    targetSpec = (localLinkPrefix === 'file' ? 'file:' : 'link:') + destDir;
+    targetSpec = 'file:' + destDir;
   }
 }
 

@@ -428,6 +428,11 @@ window.__ModuleLoader__.load({
   z-index: 2;
 }
 
+/* Display the remote host alias as a visual suffix on the sidebar row without polluting the underlying workspace title */
+[data-row-key^="workspace:remote:"] [data-rc-host-label]::after {
+  content: " (" attr(data-rc-host-label) ")";
+}
+
 /* When a remote workspace's host is disconnected, keep the folder icon visible on hover (no sessions to expand) */
 [data-row-key^="workspace:remote:"][data-rc-status="disconnected"]:hover > span:first-child,
 [data-row-key^="workspace:remote:"][data-rc-status="connecting"]:hover > span:first-child,
@@ -2231,10 +2236,11 @@ window.__ModuleLoader__.load({
             const sessionIds = Array.isArray(rec.sessionIds) ? rec.sessionIds : (existing?.sessionIds ?? [])
             const prevMs = existing?.updatedAt ? Date.parse(existing.updatedAt) : 0
             const nextMs = Math.max(Date.now(), (Number.isFinite(prevMs) ? prevMs : 0) + 1)
+            const pureTitle = rec.title || localWorkspaceId
             model.upsertView?.({
               workspaceId: localWorkspaceId,
               path: rec.remotePath || rec.path || '/',
-              title: rec.title || localWorkspaceId,
+              title: pureTitle,
               sessionIds,
               createdAt: rec.createdAt || existing?.createdAt || new Date().toISOString(),
               updatedAt: new Date(nextMs).toISOString(),
@@ -2261,10 +2267,11 @@ window.__ModuleLoader__.load({
             const nextIds = prevIds.includes(sessionId) ? prevIds : [sessionId, ...prevIds]
             const prevMs = existing?.updatedAt ? Date.parse(existing.updatedAt) : 0
             const nextMs = Math.max(Date.now(), (Number.isFinite(prevMs) ? prevMs : 0) + 1)
+            const pureTitle = existing?.title || rec?.title || localWorkspaceId
             model.upsertView?.({
               workspaceId: localWorkspaceId,
               path: existing?.path || rec?.remotePath || '/',
-              title: existing?.title || rec?.title || localWorkspaceId,
+              title: pureTitle,
               sessionIds: nextIds,
               createdAt: existing?.createdAt || rec?.createdAt || new Date().toISOString(),
               updatedAt: new Date(nextMs).toISOString(),
@@ -2299,17 +2306,18 @@ window.__ModuleLoader__.load({
                   }
                 }
               }
+              const pureTitle = ws.title
               const sameSessions = existing &&
                 Array.isArray(existing.sessionIds) &&
                 existing.sessionIds.length === wsSessionIds.length &&
                 existing.sessionIds.every((id, idx) => id === wsSessionIds[idx])
-              if (!existing || existing.title !== ws.title || existing.path !== ws.remotePath || !sameSessions) {
+              if (!existing || existing.title !== pureTitle || existing.path !== ws.remotePath || !sameSessions) {
                 const prevMs = existing?.updatedAt ? Date.parse(existing.updatedAt) : 0
                 const nextMs = Math.max(Date.now(), (Number.isFinite(prevMs) ? prevMs : 0) + 1)
                 model.upsertView?.({
                   workspaceId: ws.localWorkspaceId,
                   path: ws.remotePath || '/',
-                  title: ws.title,
+                  title: pureTitle,
                   sessionIds: wsSessionIds,
                   createdAt: ws.createdAt || existing?.createdAt || new Date().toISOString(),
                   updatedAt: new Date(nextMs).toISOString(),
@@ -2959,6 +2967,10 @@ window.__ModuleLoader__.load({
               }
               if (row.getAttribute('data-rc-host') !== parsed.host) {
                 row.setAttribute('data-rc-host', parsed.host)
+              }
+              const titleEl = row.querySelector('[class*="projectText"] > [class*="title"]')
+              if (titleEl && titleEl.getAttribute('data-rc-host-label') !== parsed.host) {
+                titleEl.setAttribute('data-rc-host-label', parsed.host)
               }
 
               const actionsSpan = row.lastElementChild

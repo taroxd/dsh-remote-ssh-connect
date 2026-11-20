@@ -17,6 +17,8 @@
 
 1. **Unified Workspaces List & Ordering**:
    - Synced remote workspaces use the local ID format `remote:<host>:<remoteWorkspaceId>` and live alongside local workspaces in the built-in `Workspaces` sidebar tree.
+   - Workspace titles are stored and forwarded verbatim: the local record title, `WorkspaceView.title`, and the remote DSH title are never rewritten by heuristic rules. Syncing a remote workspace adopts the remote title as-is, and renaming forwards the exact user-entered title to the remote host.
+   - The ` (<host>)` label is a purely visual suffix: the client sets `data-rc-host-label` on the row's title element and CSS renders it with `[data-row-key^="workspace:remote:"] [data-rc-host-label]::after { content: " (" attr(data-rc-host-label) ")"; }`. `attr()` reads the pseudo-element's own host element, so the attribute must live on the title span itself.
    - Interleaved ordering of local and remote workspaces is tracked in `RemoteWorkspaceBridge.combinedWorkspaceOrder` and persisted under the `__workspace_order__` record in `host_configs`.
    - `workspace/insertBefore` is intercepted for both local and remote workspaces so mixed drag-and-drop ordering is preserved across reloads.
    - Remote workspace folder icons in the sidebar (`[data-row-key^="workspace:remote:"] > span:first-child`) are decorated via CSS `::before`/`::after` masks with a circular `8.5px` VS Code `remote-explorer` style corner badge (`currentColor` outline and `><` glyph over a sidebar-background circular knockout).

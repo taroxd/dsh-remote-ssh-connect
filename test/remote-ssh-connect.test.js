@@ -921,7 +921,7 @@ Match host 203.0.113.*
       title: 'backend (prod-box) (prod-box)',
     })
     assert.equal(normRec.localWorkspaceId, 'remote:prod-box:ws-123')
-    assert.equal(normRec.title, 'backend (prod-box)', 'Repeated host suffixes must be deduplicated')
+    assert.equal(normRec.title, 'backend (prod-box) (prod-box)', 'Stored titles must be preserved verbatim')
     assert.equal(normRec.invalidated, false)
 
     const cfgWithCollapsed = normalizeHostConfig({ remotePort: 3080, localPort: 0, profile: 'web', pluginDiffCollapsed: true })
