@@ -12,10 +12,6 @@ window.__ModuleLoader__.load({
   id: 'dsh-remote-ssh-connect',
   factory(require) {
     const React = require('react')
-    let ReactDOM = null
-    try {
-      ReactDOM = require('react-dom')
-    } catch {}
     const h = React.createElement
 
     const NS = 'dshRemoteSshConnect'
@@ -105,7 +101,6 @@ window.__ModuleLoader__.load({
       btnConnect: '连接',
       btnDisconnect: '断开连接',
       btnCancelConnect: '取消连接',
-      btnOpenRemoteDsh: '打开远端 DSH',
       btnSettings: '连接配置',
       btnHideSettings: '收起配置',
       btnSaveConfig: '保存配置',
@@ -130,7 +125,6 @@ window.__ModuleLoader__.load({
       nextConfigNotice: '已修改下次连接配置：远端端口 {remotePort} / 本地端口 {localPort} / Profile {profile}',
 
       syncPluginLabel: '同步本地插件',
-      syncPluginPlaceholder: '选择要同步到远端的本地插件…',
       syncPluginNoLocal: '当前本地 Profile 暂无可同步的第三方或本地插件',
       sourceKind_npm: 'npm 源',
       sourceKind_github: 'GitHub 源',
@@ -158,35 +152,14 @@ window.__ModuleLoader__.load({
       btnCollapseDiff: '收起',
       btnExpandDiff: '展开',
 
-      remoteWorkspacesSection: '远程工作区',
       sidebarConnectHost: '连接主机',
       sidebarConnectingHost: '连接中…',
-      sidebarConnectHostTooltip: '连接远程主机 {host} 以查看并操作此远程工作区下的会话',
-      sidebarNewSessionTooltip: '在“{name}”中新建会话',
-      sidebarWorkspaceActionsTooltip: '工作区“{name}”的操作',
-      sidebarSessionActionsTooltip: '会话“{name}”的操作',
-      sidebarNewSessionTitle: '新会话',
-      sidebarUntitledSession: '未命名',
-      sidebarShowMoreSessions: '展开其余 {n} 个会话',
-      sidebarShowLessSessions: '收起',
       menuConnectHost: '连接远程主机 ({host})',
       menuDisconnectHost: '断开远程主机 ({host})',
       menuOpenRemoteNative: '在浏览器打开远端原生 DSH ({host})',
-      menuRenameWorkspace: '重命名工作区',
-      menuRemoveWorkspace: '移除远程工作区',
-      menuRenameSession: '重命名会话',
-      menuPinSession: '置顶会话',
-      menuUnpinSession: '取消置顶',
-      menuForkSession: '分叉会话',
-      menuArchiveSession: '归档会话',
-      menuCopySessionId: '复制 Session ID',
       headerRemoteBadge: '远端: {host}',
       headerOpenRemoteNative: '远端原生界面',
 
-      timeNow: '刚刚',
-      timeMinutes: '{n}分钟',
-      timeHours: '{n}小时',
-      timeDays: '{n}天',
 
       invalidWsModalTitle: '远程工作区已失效',
       invalidWsModalDesc: '远端主机 {host} 上的工作区「{title}」（路径：{path}）已被删除或不存在。确认后将从本地导航栏移除此远程工作区。',
@@ -264,7 +237,6 @@ window.__ModuleLoader__.load({
       btnConnect: 'Connect',
       btnDisconnect: 'Disconnect',
       btnCancelConnect: 'Cancel',
-      btnOpenRemoteDsh: 'Open remote DSH',
       btnSettings: 'Settings',
       btnHideSettings: 'Hide settings',
       btnSaveConfig: 'Save settings',
@@ -289,7 +261,6 @@ window.__ModuleLoader__.load({
       nextConfigNotice: 'Next connection settings: remote port {remotePort} / local port {localPort} / profile {profile}',
 
       syncPluginLabel: 'Sync local plugin',
-      syncPluginPlaceholder: 'Select a local plugin to sync…',
       syncPluginNoLocal: 'No user-installed local plugins found in the current profile',
       sourceKind_npm: 'npm source',
       sourceKind_github: 'GitHub source',
@@ -317,35 +288,14 @@ window.__ModuleLoader__.load({
       btnCollapseDiff: 'Collapse',
       btnExpandDiff: 'Expand',
 
-      remoteWorkspacesSection: 'Remote Workspaces',
       sidebarConnectHost: 'Connect host',
       sidebarConnectingHost: 'Connecting…',
-      sidebarConnectHostTooltip: 'Connect to remote host "{host}" to view and control sessions in this workspace',
-      sidebarNewSessionTooltip: 'New session in {name}',
-      sidebarWorkspaceActionsTooltip: 'Workspace actions for {name}',
-      sidebarSessionActionsTooltip: 'Session actions for {name}',
-      sidebarNewSessionTitle: 'New Session',
-      sidebarUntitledSession: 'Untitled',
-      sidebarShowMoreSessions: 'Show {n} more sessions',
-      sidebarShowLessSessions: 'Show less',
       menuConnectHost: 'Connect remote host ({host})',
       menuDisconnectHost: 'Disconnect remote host ({host})',
       menuOpenRemoteNative: 'Open remote native DSH in browser ({host})',
-      menuRenameWorkspace: 'Rename workspace',
-      menuRemoveWorkspace: 'Remove remote workspace',
-      menuRenameSession: 'Rename session',
-      menuPinSession: 'Pin session',
-      menuUnpinSession: 'Unpin session',
-      menuForkSession: 'Fork session',
-      menuArchiveSession: 'Archive session',
-      menuCopySessionId: 'Copy Session ID',
       headerRemoteBadge: 'Remote: {host}',
       headerOpenRemoteNative: 'Remote native UI',
 
-      timeNow: 'now',
-      timeMinutes: '{n}min',
-      timeHours: '{n}h',
-      timeDays: '{n}d',
 
       invalidWsModalTitle: 'Remote workspace is no longer valid',
       invalidWsModalDesc: 'The workspace "{title}" ({path}) on remote host "{host}" has been deleted on the remote machine. Confirm to remove this remote workspace from your local sidebar.',
@@ -1109,133 +1059,6 @@ window.__ModuleLoader__.load({
       }))
     }
 
-    function FolderCloseIcon({ size = 16 }) {
-      return h('svg', {
-        width: size,
-        height: size,
-        viewBox: '0 0 16 16',
-        fill: 'none',
-        strokeWidth: 1,
-        'aria-hidden': 'true',
-      },
-      h('path', {
-        d: 'M1.50439 3.11059C1.50439 2.55831 1.95211 2.1106 2.50439 2.1106H5.43389C5.67773 2.1106 5.91318 2.19969 6.09593 2.36113L7.71649 3.79265C7.89924 3.95409 8.1347 4.04319 8.3785 4.04319H13.4958C14.0481 4.04319 14.4958 4.4909 14.4958 5.04319V12.8894C14.4958 13.4417 14.0481 13.8894 13.4958 13.8894H2.50439C1.95211 13.8894 1.50439 13.4417 1.50439 12.8894V4.04319V3.11059Z',
-        stroke: 'currentColor',
-      }),
-      h('path', {
-        d: 'M3.63501 7.66614H12.3647',
-        stroke: 'currentColor',
-      }))
-    }
-
-    function FolderOpenIcon({ size = 16 }) {
-      return h('svg', {
-        width: size,
-        height: size,
-        viewBox: '0 0 16 16',
-        fill: 'none',
-        strokeWidth: 1,
-        'aria-hidden': 'true',
-      },
-      h('path', {
-        d: 'M2.55912 7.93683C2.67584 7.49906 3.0723 7.19446 3.52536 7.19446H13.6491C14.3061 7.19446 14.7846 7.81725 14.6153 8.45209L13.4411 12.856C13.3244 13.2938 12.9279 13.5984 12.4748 13.5984H2.35113C1.69411 13.5984 1.21562 12.9756 1.38489 12.3407L2.55912 7.93683Z',
-        fill: 'currentColor',
-        opacity: '0.16',
-      }),
-      h('path', {
-        d: 'M13.6491 6.69446C14.6346 6.69453 15.3522 7.62895 15.0983 8.58118L13.9245 12.9845C13.7494 13.6412 13.1539 14.0988 12.4743 14.0988H2.35126C1.36574 14.0988 0.648153 13.1643 0.902044 12.212L2.07587 7.80774C2.25102 7.15128 2.84567 6.69455 3.52509 6.69446H13.6491ZM3.52509 7.69446C3.29865 7.69455 3.10004 7.84674 3.04169 8.06555L1.86786 12.4698C1.78345 12.7872 2.02285 13.0988 2.35126 13.0988H12.4743C12.7007 13.0988 12.8992 12.9463 12.9577 12.7277L14.1325 8.32336C14.2171 8.00598 13.9776 7.69453 13.6491 7.69446H3.52509Z',
-        fill: 'currentColor',
-      }),
-      h('path', {
-        d: 'M4.7666 1.90137C5.13227 1.90144 5.48571 2.03525 5.75977 2.27734L7.27246 3.61328C7.36379 3.69382 7.48174 3.73828 7.60352 3.73828H12.3994C13.2276 3.73841 13.8993 4.41005 13.8994 5.23828V6.7168C13.8183 6.70327 13.735 6.69436 13.6494 6.69434H12.8994V5.23828C12.8993 4.96233 12.6754 4.73841 12.3994 4.73828H7.60352C7.23781 4.73828 6.88446 4.60438 6.61035 4.3623L5.09766 3.02637C5.00636 2.94576 4.88838 2.90144 4.7666 2.90137H2.0498C1.77366 2.90137 1.5498 3.12523 1.5498 3.40137V9.78223L0.902344 12.2119C0.648452 13.1642 1.36604 14.0986 2.35156 14.0986H2.0498C1.2214 14.0986 0.549838 13.427 0.549805 12.5986V3.40137C0.549805 2.57294 1.22138 1.90137 2.0498 1.90137H4.7666Z',
-        fill: 'currentColor',
-      }))
-    }
-
-    function TriangleRightIcon({ size = 14, open = false }) {
-      return h('svg', {
-        width: size,
-        height: size,
-        viewBox: '0 0 16 16',
-        fill: 'none',
-        strokeWidth: 1,
-        className: 'dsh-rc-rw-arrow',
-        'data-open': open ? 'true' : 'false',
-        'aria-hidden': 'true',
-      },
-      h('path', {
-        d: 'M5.5 4.5C5.5 4.40714 5.52586 4.31612 5.57467 4.23713C5.62349 4.15815 5.69334 4.09431 5.77639 4.05279C5.85945 4.01126 5.95242 3.99368 6.0449 4.00202C6.13738 4.01036 6.22572 4.04429 6.3 4.1L10.967 7.6C11.0291 7.64657 11.0795 7.70697 11.1142 7.77639C11.1489 7.84582 11.167 7.92238 11.167 8C11.167 8.07762 11.1489 8.15418 11.1142 8.22361C11.0795 8.29303 11.0291 8.35343 10.967 8.4L6.3 11.9C6.22572 11.9557 6.13738 11.9896 6.0449 11.998C5.95242 12.0063 5.85945 11.9887 5.77639 11.9472C5.69334 11.9057 5.62349 11.8419 5.57467 11.7629C5.52586 11.6839 5.5 11.5929 5.5 11.5V4.5Z',
-        fill: 'currentColor',
-      }))
-    }
-
-    function NewChatIcon({ size = 14 }) {
-      return h('svg', {
-        width: size,
-        height: size,
-        viewBox: '0 0 16 16',
-        fill: 'none',
-        strokeWidth: 1,
-        'aria-hidden': 'true',
-      },
-      h('path', {
-        d: 'M2.37091 11.2501C1.58745 9.89288 1.32067 8.29835 1.61969 6.76006C1.91872 5.22177 2.76342 3.8433 3.99826 2.87846C5.2331 1.91362 6.77494 1.42737 8.33988 1.50925C9.90482 1.59113 11.3875 2.23562 12.5149 3.32406C13.6425 4.41269 14.3387 5.87206 14.4754 7.4334C14.612 8.99474 14.18 10.5529 13.2587 11.8209C12.3375 13.0888 10.9891 13.9813 9.46194 14.3337C8.18691 14.628 6.85895 14.5294 5.64989 14.0605C5.1712 13.8748 4.76962 13.4932 4.26534 13.3967C3.67413 13.2835 2.95257 13.5598 2.03794 14.3337',
-        stroke: 'currentColor',
-      }),
-      h('path', {
-        d: 'M8 5V11',
-        stroke: 'currentColor',
-      }),
-      h('path', {
-        d: 'M5 8H11',
-        stroke: 'currentColor',
-      }))
-    }
-
-    function MoreHorizontalIcon({ size = 16 }) {
-      return h('svg', {
-        width: size,
-        height: size,
-        viewBox: '0 0 16 16',
-        fill: 'none',
-        strokeWidth: 1,
-        'aria-hidden': 'true',
-      },
-      h('path', {
-        d: 'M3 9C3.55228 9 4 8.55228 4 8C4 7.44772 3.55228 7 3 7C2.44772 7 2 7.44772 2 8C2 8.55228 2.44772 9 3 9Z',
-        fill: 'currentColor',
-      }),
-      h('path', {
-        d: 'M8 9C8.55228 9 9 8.55228 9 8C9 7.44772 8.55228 7 8 7C7.44772 7 7 7.44772 7 8C7 8.55228 7.44772 9 8 9Z',
-        fill: 'currentColor',
-      }),
-      h('path', {
-        d: 'M13 9C13.5523 9 14 8.55228 14 8C14 7.44772 13.5523 7 13 7C12.4477 7 12 7.44772 12 8C12 8.55228 12.4477 9 13 9Z',
-        fill: 'currentColor',
-      }))
-    }
-
-    function PinSmallIcon({ size = 14 }) {
-      return h('svg', {
-        width: size,
-        height: size,
-        viewBox: '0 0 16 16',
-        fill: 'none',
-        strokeWidth: 1,
-        'aria-hidden': 'true',
-      },
-      h('path', {
-        d: 'M9.96976 1.70572L13.1554 3.93629L10.9019 8.12317L11.5158 11.605L10.7192 12.7427L2.52767 7.00693L3.3243 5.86922L6.80612 5.25528L9.96976 1.70572Z',
-        fill: 'currentColor',
-        stroke: 'currentColor',
-        strokeLinejoin: 'round',
-      }),
-      h('path', {
-        d: 'M6.05285 9.47511C6.27284 9.16094 6.70586 9.08458 7.02003 9.30457C7.3342 9.52455 7.41055 9.95757 7.19057 10.2717L3.98587 14.4708L3.21223 13.9291L6.05285 9.47511Z',
-        fill: 'currentColor',
-      }))
-    }
-
     function ConnectLinkIcon({ size = 11 }) {
       return h('svg', {
         width: size,
@@ -1356,18 +1179,6 @@ window.__ModuleLoader__.load({
         strokeLinecap: 'round',
         strokeLinejoin: 'round',
       }))
-    }
-
-    function formatRelativeTime(updatedAtMs, nowMs, t) {
-      if (!updatedAtMs || !Number.isFinite(updatedAtMs)) return ''
-      const diffSec = Math.max(0, Math.floor((nowMs - updatedAtMs) / 1000))
-      if (diffSec < 60) return t('timeNow')
-      const diffMin = Math.floor(diffSec / 60)
-      if (diffMin < 60) return t('timeMinutes', { n: String(diffMin) })
-      const diffHours = Math.floor(diffMin / 60)
-      if (diffHours < 24) return t('timeHours', { n: String(diffHours) })
-      const diffDays = Math.floor(diffHours / 24)
-      return t('timeDays', { n: String(diffDays) })
     }
 
     function phaseLabel(hostItem, t) {
@@ -2594,24 +2405,6 @@ window.__ModuleLoader__.load({
           directory.unsubscribeCatalog = targetCatalog.store.subscribe(() => {
             try {
               directory.syncInputs()
-              // If this is a remote session whose current model is not routable on the remote host
-              // while the remote catalog has a valid default model, auto-align blank sessions to the remote default
-              if (hostTag && typeof directory.isBlank === 'function' && directory.isBlank()) {
-                const dirSnap = directory.store?.getSnapshot?.()
-                const catSnap = targetCatalog.store?.getSnapshot?.()
-                const remoteDef = catSnap?.value?.default
-                if (
-                  catSnap?.status === 'ready' &&
-                  dirSnap?.routable === false &&
-                  dirSnap?.status === 'ready' &&
-                  remoteDef?.provider &&
-                  remoteDef?.model &&
-                  !directory._rcAutoAlignedDefault
-                ) {
-                  directory._rcAutoAlignedDefault = true
-                  void directory.select(remoteDef).catch(() => {})
-                }
-              }
             } catch {}
           })
           try {
@@ -2649,10 +2442,14 @@ window.__ModuleLoader__.load({
           }
         }
 
+        // The `modelDirectories` service instance currently hooked by `installModelDirectoriesInterceptor`.
+        let hookedModelDirectories = null
+
         function reconcileAllModelDirectories() {
           try {
-            const mdSvc = unwrapCordisService(ctx.get?.('modelDirectories'))
-            const liveValues = mdSvc?.live?.directories?.values
+            // `live.directories` is not a public API: feature-detect it so directories created before the
+            // hook was installed are still rebound; directories created afterwards are tracked by the hook.
+            const liveValues = hookedModelDirectories?.live?.directories?.values
             if (liveValues && typeof liveValues[Symbol.iterator] === 'function') {
               for (const dir of liveValues) {
                 trackedModelDirectories.add(dir)
@@ -2668,26 +2465,51 @@ window.__ModuleLoader__.load({
           }
         }
 
-        function installModelDirectoriesInterceptor() {
-          try {
-            const mdProxy = ctx.get?.('modelDirectories')
-            const md = unwrapCordisService(mdProxy)
-            if (!md || typeof md.directoryFor !== 'function' || md._rcDirectoryForWrapped) return
-            const origDirectoryFor = md.directoryFor.bind(md)
-            md.directoryFor = (sessionId) => {
-              const directory = origDirectoryFor(sessionId)
-              if (directory && !directory.disposed) {
-                if (!directory._rcOriginalLocalCatalog) {
-                  directory._rcOriginalLocalCatalog = directory.catalog
-                }
-                trackedModelDirectories.add(directory)
-                reconcileDirectoryCatalog(directory)
+        /**
+         * Hook `modelDirectories.directoryFor` so remote sessions bind to their host's catalog.
+         * Installed once per `modelDirectories` service lifetime through `ctx.inject`; the returned
+         * disposer restores the original method and rebinds every tracked directory to its local catalog.
+         * @returns {() => void}
+         */
+        function installModelDirectoriesInterceptor(mdService) {
+          const md = unwrapCordisService(mdService)
+          if (!md || typeof md.directoryFor !== 'function' || md._rcDirectoryForWrapped) return () => {}
+          const hadOwn = Object.prototype.hasOwnProperty.call(md, 'directoryFor')
+          const ownDirectoryFor = hadOwn ? md.directoryFor : undefined
+          const origDirectoryFor = md.directoryFor.bind(md)
+          const wrapped = (sessionId) => {
+            const directory = origDirectoryFor(sessionId)
+            if (directory && !directory.disposed) {
+              if (!directory._rcOriginalLocalCatalog) {
+                directory._rcOriginalLocalCatalog = directory.catalog
               }
-              return directory
+              trackedModelDirectories.add(directory)
+              try {
+                reconcileDirectoryCatalog(directory)
+              } catch {}
             }
-            md._rcDirectoryForWrapped = true
-            reconcileAllModelDirectories()
-          } catch {}
+            return directory
+          }
+          md.directoryFor = wrapped
+          md._rcDirectoryForWrapped = true
+          hookedModelDirectories = md
+          reconcileAllModelDirectories()
+          return () => {
+            if (md.directoryFor === wrapped) {
+              if (hadOwn) md.directoryFor = ownDirectoryFor
+              else delete md.directoryFor
+            }
+            delete md._rcDirectoryForWrapped
+            if (hookedModelDirectories === md) hookedModelDirectories = null
+            for (const dir of [...trackedModelDirectories]) {
+              try {
+                if (dir && !dir.disposed && dir._rcOriginalLocalCatalog) {
+                  bindDirectoryToCatalog(dir, dir._rcOriginalLocalCatalog, null)
+                }
+              } catch {}
+            }
+            trackedModelDirectories.clear()
+          }
         }
 
         // Shared reactive store across sidebar and SSH Connect panel
@@ -2770,7 +2592,6 @@ window.__ModuleLoader__.load({
 
             syncAllWorkspacesToClientModel(this.syncedWorkspaces)
             ensureSessionsInClientStore(this.syncedWorkspaces)
-            installModelDirectoriesInterceptor()
             reconcileAllModelDirectories()
             if (newlyConnected) {
               try {
@@ -2804,13 +2625,17 @@ window.__ModuleLoader__.load({
           } catch {}
         }
 
-        // Intercept modelDirectories.directoryFor so remote sessions use their remote host's model catalog
-        ctx.effect(() => {
-          installModelDirectoriesInterceptor()
-          const timer = setInterval(installModelDirectoriesInterceptor, 1000)
-          timer?.unref?.()
-          return () => clearInterval(timer)
-        }, 'remote-ssh-connect: modelDirectories intercept')
+        // Hook modelDirectories.directoryFor so remote sessions use their remote host's model catalog.
+        // `ctx.inject` runs the callback whenever the service becomes available and disposes the hook
+        // with it, so no polling is needed.
+        if (typeof ctx.inject === 'function') {
+          ctx.inject(['modelDirectories'], (scope) => {
+            scope.effect(
+              () => installModelDirectoriesInterceptor(scope.modelDirectories),
+              'remote-ssh-connect: modelDirectories intercept',
+            )
+          })
+        }
 
         // Intercept uiWorkspace.startSession, openWorkspace, and connectWorkspace on the underlying service instance
         ctx.effect(() => {
@@ -2927,6 +2752,34 @@ window.__ModuleLoader__.load({
           })
         }, 'remote-ssh-connect: workspace contextMenu')
 
+        const SVG_NS = 'http://www.w3.org/2000/svg'
+
+        function createConnectGlyph() {
+          const svg = document.createElementNS(SVG_NS, 'svg')
+          svg.setAttribute('width', '14')
+          svg.setAttribute('height', '14')
+          svg.setAttribute('viewBox', '0 0 16 16')
+          svg.setAttribute('fill', 'none')
+          svg.setAttribute('aria-hidden', 'true')
+          const path = document.createElementNS(SVG_NS, 'path')
+          path.setAttribute('d', 'M6.5 9.5L9.5 6.5M5 7L3.5 8.5C2.4 9.6 2.4 11.4 3.5 12.5C4.6 13.6 6.4 13.6 7.5 12.5L9 11M11 9L12.5 7.5C13.6 6.4 13.6 4.6 12.5 3.5C11.4 2.4 9.6 2.4 8.5 3.5L7 5')
+          path.setAttribute('stroke', 'currentColor')
+          path.setAttribute('stroke-width', '1.5')
+          path.setAttribute('stroke-linecap', 'round')
+          svg.appendChild(path)
+          return svg
+        }
+
+        /**
+         * Find the title span of a built-in workspace row. The Workspaces list exposes no stable hook for
+         * the title, so match its CSS-module class first and fall back to the row structure
+         * (`<span projectText><span title>` as the third child of the row).
+         */
+        function findWorkspaceRowTitle(row) {
+          return row.querySelector('[class*="projectText"] > [class*="title"]')
+            || row.querySelector(':scope > span:nth-child(3) > span:only-child')
+        }
+
         /**
          * Synchronize `data-rc-status` and `data-rc-host` attributes onto remote workspace rows
          * (`[data-row-key^="workspace:remote:"]`) in the built-in Workspaces list so the VS Code-style
@@ -2950,7 +2803,7 @@ window.__ModuleLoader__.load({
               if (row.getAttribute('data-rc-host') !== parsed.host) {
                 row.setAttribute('data-rc-host', parsed.host)
               }
-              const titleEl = row.querySelector('[class*="projectText"] > [class*="title"]')
+              const titleEl = findWorkspaceRowTitle(row)
               if (titleEl && titleEl.getAttribute('data-rc-host-label') !== parsed.host) {
                 titleEl.setAttribute('data-rc-host-label', parsed.host)
               }
@@ -2968,7 +2821,7 @@ window.__ModuleLoader__.load({
                   connectBtn = document.createElement('button')
                   connectBtn.type = 'button'
                   connectBtn.className = 'dsh-rc-inline-connect-btn'
-                  connectBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6.5 9.5L9.5 6.5M5 7L3.5 8.5C2.4 9.6 2.4 11.4 3.5 12.5C4.6 13.6 6.4 13.6 7.5 12.5L9 11M11 9L12.5 7.5C13.6 6.4 13.6 4.6 12.5 3.5C11.4 2.4 9.6 2.4 8.5 3.5L7 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>`
+                  connectBtn.appendChild(createConnectGlyph())
                   connectBtn.addEventListener('click', (e) => {
                     e.stopPropagation()
                     e.preventDefault()
@@ -3029,11 +2882,30 @@ window.__ModuleLoader__.load({
           React.useEffect(() => {
             decorateRemoteWorkspaceRowsInDom()
             if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') return undefined
-            const obs = new MutationObserver(() => {
-              decorateRemoteWorkspaceRowsInDom()
+            // The Workspaces list virtualizes and re-renders its rows, so re-apply the decoration when rows
+            // are (re)mounted. Only `childList` is observed (our own attribute writes never re-trigger it),
+            // and bursts of mutations are coalesced into one pass per animation frame.
+            let scheduled = 0
+            const schedule = typeof requestAnimationFrame === 'function'
+              ? (fn) => requestAnimationFrame(fn)
+              : (fn) => setTimeout(fn, 16)
+            const cancel = typeof cancelAnimationFrame === 'function'
+              ? (id) => cancelAnimationFrame(id)
+              : (id) => clearTimeout(id)
+            const obs = new MutationObserver((records) => {
+              if (scheduled) return
+              const relevant = records.some((r) => [...r.addedNodes].some((n) => n.nodeType === 1))
+              if (!relevant) return
+              scheduled = schedule(() => {
+                scheduled = 0
+                decorateRemoteWorkspaceRowsInDom()
+              })
             })
             obs.observe(document.body, { childList: true, subtree: true })
-            return () => obs.disconnect()
+            return () => {
+              obs.disconnect()
+              if (scheduled) cancel(scheduled)
+            }
           }, [])
 
           const firstInvalidated = sharedState.invalidatedWorkspaces[0] || null

@@ -28,10 +28,14 @@ import { loadSshConfigHosts } from './ssh-config.js'
 export const DEFAULT_REMOTE_PORT = 3080
 export const DEFAULT_LOCAL_PORT = 0
 export const DEFAULT_PROFILE = 'web'
+/** Time the remote DSH may take from spawn to printing its `dsh web:` URL line. */
+export const DEFAULT_DSH_STARTUP_TIMEOUT_MS = 180_000
 
 /**
- * Resolve the running local DSH version string (e.g. "0.2.2-rc.3").
- * @returns {string}
+ * Resolve the running local DSH version string (e.g. "0.2.2-rc.5").
+ * The remote host must run exactly this version, so there is deliberately no hard-coded fallback:
+ * a stale constant would silently deploy an older DSH whose wire protocol may differ.
+ * @returns {string | null} the version, or `null` when no local DSH manifest can be read
  */
 export function resolveLocalDshVersion() {
   const candidates = []
@@ -61,7 +65,7 @@ export function resolveLocalDshVersion() {
       /* continue */
     }
   }
-  return '0.2.2-rc.3'
+  return null
 }
 
 /**
@@ -172,6 +176,7 @@ export class RemoteConnectionManager {
    * @param {string} [options.customDshTarballUrl]
    * @param {(host: string, config: object) => Promise<void>} [options.onSaveConfig]
    * @param {typeof openUrlInDefaultBrowser} [options.openBrowser]
+   * @param {number} [options.dshStartupTimeoutMs] Maximum time between the remote `starting_dsh` phase and the `ready` event.
    */
   constructor(options = {}) {
     this.sshConfigPath = options.sshConfigPath
@@ -187,6 +192,9 @@ export class RemoteConnectionManager {
     this.onSaveWorkspaceOrder = options.onSaveWorkspaceOrder ?? (async () => {})
     this.openBrowser = options.openBrowser ?? openUrlInDefaultBrowser
     this.spawnProcess = options.spawnProcess ?? spawn
+    this.dshStartupTimeoutMs = Number.isFinite(options.dshStartupTimeoutMs) && options.dshStartupTimeoutMs > 0
+      ? options.dshStartupTimeoutMs
+      : DEFAULT_DSH_STARTUP_TIMEOUT_MS
 
     /** @type {Map<string, { remotePort: number, localPort: number, profile: string }>} */
     this.hostConfigs = new Map()
@@ -354,6 +362,9 @@ export class RemoteConnectionManager {
     }
 
     const cfg = this.getHostConfig(hostKey)
+    if (!this.dshVersion) {
+      throw new Error('Cannot determine the local DSH version (no readable @deepseek-ai/dsh package.json); refusing to deploy an arbitrary DSH version to the remote host.')
+    }
     let allocatedLocalPort
     try {
       allocatedLocalPort = await acquireLocalPort(cfg.localPort)
@@ -492,6 +503,36 @@ export class RemoteConnectionManager {
     }, 15_000)
     session.keepaliveTimer.unref?.()
 
+    let startupTimer = null
+    const clearStartupTimer = () => {
+      if (startupTimer) {
+        clearTimeout(startupTimer)
+        startupTimer = null
+      }
+    }
+    const armStartupTimer = () => {
+      clearStartupTimer()
+      startupTimer = setTimeout(() => {
+        startupTimer = null
+        if (session.status !== 'connecting' || session.userDisconnecting) return
+        const seconds = Math.round(this.dshStartupTimeoutMs / 1000)
+        const tail = session.recentLogs.slice(-5).join('\n')
+        session.status = 'error'
+        session.phase = 'idle'
+        session.error = {
+          code: 'REMOTE_DSH_START_TIMEOUT',
+          remotePort: cfg.remotePort,
+          message: `Remote DSH did not report its URL within ${seconds}s.${tail ? `\nLast remote output:\n${tail}` : ''}`,
+        }
+        resolveReady(session)
+        // Closing SSH makes the remote supervisor's watchdog terminate the DSH process group.
+        try {
+          if (child && child.exitCode === null && !child.killed) child.kill('SIGTERM')
+        } catch {}
+      }, this.dshStartupTimeoutMs)
+      startupTimer.unref?.()
+    }
+
     const handleEvent = (ev) => {
       if (!ev || typeof ev !== 'object') return
       if (ev.type === 'phase') {
@@ -499,6 +540,7 @@ export class RemoteConnectionManager {
         if (typeof ev.initializedFromWeb === 'boolean') {
           session.initializedFromWeb = ev.initializedFromWeb
         }
+        if (ev.phase === 'starting_dsh') armStartupTimer()
         return
       }
       if (ev.type === 'dsh_ready') {
@@ -534,6 +576,8 @@ export class RemoteConnectionManager {
         return
       }
       if (ev.type === 'ready') {
+        clearStartupTimer()
+        if (session.status === 'error' && session.error?.code === 'REMOTE_DSH_START_TIMEOUT') return
         session.status = 'connected'
         session.phase = 'ready'
         session.url = ev.url || `http://127.0.0.1:${allocatedLocalPort}/`
@@ -619,6 +663,7 @@ export class RemoteConnectionManager {
     createInterface({ input: child.stderr }).on('line', (l) => parseLine(l, true))
 
     child.once('error', (err) => {
+      clearStartupTimer()
       if (session.keepaliveTimer) {
         clearInterval(session.keepaliveTimer)
         session.keepaliveTimer = null
@@ -638,6 +683,7 @@ export class RemoteConnectionManager {
     })
 
     child.once('close', (code) => {
+      clearStartupTimer()
       if (session.keepaliveTimer) {
         clearInterval(session.keepaliveTimer)
         session.keepaliveTimer = null

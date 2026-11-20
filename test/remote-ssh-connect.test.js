@@ -21,7 +21,12 @@ import {
   loadSshConfigHosts,
   makeLocalWorkspaceId,
   MinimalWsClient,
+  describeToolApproval,
+  NODE_TARBALL_SHA256,
+  registerAgentTool,
+  RemoteWorkspaceBridge,
   normalizeHostConfig,
+  normalizeProjectionFrame,
   normalizeSyncedWorkspaceRecord,
   openUrlInDefaultBrowser,
   packLocalPluginDirectory,
@@ -208,6 +213,10 @@ Match host 203.0.113.*
 
     const { Script } = await import('node:vm')
     assert.doesNotThrow(() => new Script(supervisorJs), 'supervisorJs must be valid JavaScript syntax')
+    // Without HMR the remote PluginManager answers `stop-profile`; the supervisor must explain it.
+    assert.ok(supervisorJs.includes("/^hmr \\(@deepseek-ai\\/dsh-hmr\\):/"), 'supervisor records dsh-hmr activation failures')
+    assert.ok(supervisorJs.includes("code === 'stop-profile'"))
+    assert.ok(supervisorJs.includes('fs.inotify.max_user_watches'))
 
     const killCmd = buildKillRemotePortScript(3080)
     assert.equal(killCmd.startsWith('mkdir -p ~/.dsh-remote-ssh-connect && printf %s '), true)
@@ -521,6 +530,55 @@ Match host 203.0.113.*
         st = await manager.getHostStatus('cancel-node')
         assert.equal(st.status, 'disconnected')
         assert.equal(st.authPrompt, null)
+      } finally {
+        await manager.dispose()
+      }
+    } finally {
+      await rm(tmpRoot, { recursive: true, force: true })
+    }
+  }
+
+  // 9b. A remote DSH that never prints its URL fails with REMOTE_DSH_START_TIMEOUT and closes SSH
+  {
+    const tmpRoot = await mkdtemp(join(tmpdir(), 'dsh-rc-start-timeout-test-'))
+    try {
+      const sshConfigPath = join(tmpRoot, 'config')
+      await writeFile(sshConfigPath, ['Host slow-node', '  HostName 198.51.100.56'].join('\n'), 'utf8')
+
+      let sshKilled = false
+      const mockSpawn = () => {
+        const child = new EventEmitter()
+        child.stdin = new PassThrough()
+        child.stdout = new PassThrough()
+        child.stderr = new PassThrough()
+        child.exitCode = null
+        child.killed = false
+        child.kill = () => {
+          sshKilled = true
+          child.killed = true
+          child.exitCode = 1
+          child.emit('close', 1)
+        }
+        setImmediate(() => {
+          child.stdout.write(`${EVENT_PREFIX}{"type":"phase","phase":"starting_dsh"}\n`)
+          child.stdout.write(`${EVENT_PREFIX}{"type":"log","stream":"stderr","line":"hmr: ENOSPC watcher limit"}\n`)
+        })
+        return child
+      }
+
+      const manager = new RemoteConnectionManager({
+        sshConfigPath,
+        dshVersion: '0.2.2-rc.5',
+        spawnProcess: mockSpawn,
+        dshStartupTimeoutMs: 50,
+      })
+      await manager.init()
+      try {
+        const st = await manager.connectHost('slow-node', { waitForReady: true })
+        assert.equal(st.status, 'error')
+        assert.equal(st.error?.code, 'REMOTE_DSH_START_TIMEOUT')
+        assert.match(st.error?.message ?? '', /ENOSPC watcher limit/)
+        assert.equal(sshKilled, true)
       } finally {
         await manager.dispose()
       }
@@ -1068,6 +1126,22 @@ Match host 203.0.113.*
                     },
                   }),
                 })
+                // A live 0.2.2 projection frame: `changes` is an array of `{ key, val }` entries.
+                this.emit('message', {
+                  data: JSON.stringify({
+                    type: 'item',
+                    streamId: msg.streamId,
+                    value: {
+                      type: 'projection',
+                      sessionId: 'session-remote-1',
+                      seq: 7,
+                      changes: [
+                        { key: 'title', val: 'Fix memory leak v2' },
+                        { key: 'running', val: true },
+                      ],
+                    },
+                  }),
+                })
               }, 5)
             } else if (msg.endpoint === '$events') {
               setTimeout(() => {
@@ -1302,6 +1376,32 @@ Match host 203.0.113.*
         // Connected state: projected WorkspaceView must expose the remote workspace's sessionIds
         assert.deepEqual(syncRes.view.sessionIds, ['session-remote-1', 'session-remote-2'])
 
+        // Live `session/control` projection frames carry `changes` as `{ key, val }[]` and must be applied by key
+        {
+          const deadline = Date.now() + 2000
+          let proj
+          while (Date.now() < deadline) {
+            proj = manager.workspaceBridge.hostClients.get('ws-box')?.remoteProjections.get('session-remote-1')
+            if (proj?.asOfSeq === 7) break
+            await new Promise((r) => setTimeout(r, 10))
+          }
+          assert.equal(proj?.asOfSeq, 7)
+          assert.deepEqual(proj.values, { title: 'Fix memory leak v2', running: true })
+          assert.equal(Object.hasOwn(proj.values, '0'), false, 'Array indices must never leak into projection values')
+          const combined = manager.workspaceBridge.getCombinedProjections({})
+          assert.deepEqual(combined['session-remote-1'].values, { title: 'Fix memory leak v2', running: true })
+        }
+        assert.deepEqual(
+          normalizeProjectionFrame({ sessionId: 's', seq: 3, changes: [{ key: 'b', val: 2 }, null, { val: 9 }] }),
+          { type: 'projection', sessionId: 's', seq: 3, changes: [{ key: 'b', val: 2 }] },
+        )
+        assert.deepEqual(
+          normalizeProjectionFrame({ sessionId: 's', seq: 1, key: 'title', value: 'x' }),
+          { type: 'projection', sessionId: 's', seq: 1, changes: [{ key: 'title', val: 'x' }] },
+          'Pre-0.2.2 single-key frames are converted to the array shape',
+        )
+        assert.equal(normalizeProjectionFrame({ sessionId: 's', changes: { title: 'x' } }), null)
+
         // Verify session/list RPC interception merges only sessions belonging to the synced workspace (not unwatched rws-beta)
         const listRpcRes = await manager.workspaceBridge.interceptRpc(
           'session/list',
@@ -1482,6 +1582,64 @@ Match host 203.0.113.*
     } finally {
       await rm(tmpRoot, { recursive: true, force: true })
     }
+  }
+
+  // 12b. Review hardening: approval gate, Node checksum pinning, upload method guard, follower fallback
+  {
+    for (const action of ['list_hosts', 'get_status', 'list_local_plugins', 'list_remote_workspaces', 'list_synced_workspaces']) {
+      assert.equal(describeToolApproval({ action }), null, `${action} is read-only`)
+    }
+    for (const action of ['kill_remote_port', 'sync_plugin', 'configure_host', 'connect', 'disconnect', 'open_browser', 'sync_workspace', 'remove_workspace', 'unknown_future_action']) {
+      const approval = describeToolApproval({ action, host: 'box' })
+      assert.ok(approval && approval.reason && approval.displayReason.en && approval.displayReason.zh, `${action} requires approval`)
+    }
+    assert.match(describeToolApproval({ action: 'sync_plugin', host: 'box', pluginName: 'p', force: true }).displayReason.en, /overwriting/)
+
+    // The tools/pre-execute listener returns `ask` for side-effecting calls and delegates otherwise.
+    const listeners = []
+    const fakeCtx = {
+      inject(deps, cb) {
+        if (deps.length === 1 && deps[0] === 'tools') {
+          cb({
+            effect: (fn) => fn(),
+            on: (name, fn) => { if (name === 'tools/pre-execute') listeners.push(fn); return () => {} },
+            tools: { register: () => () => {} },
+          })
+        }
+      },
+    }
+    registerAgentTool(fakeCtx, {})
+    assert.equal(listeners.length, 1)
+    const allow = { kind: 'allow' }
+    assert.equal(await listeners[0]({ name: 'remote_ssh_connect', arguments: { action: 'list_hosts' } }, async () => allow), allow)
+    assert.equal(await listeners[0]({ name: 'other_tool', arguments: { action: 'kill_remote_port' } }, async () => allow), allow)
+    const ask = await listeners[0]({ name: 'remote_ssh_connect', arguments: { action: 'kill_remote_port', host: 'box' } }, async () => allow)
+    assert.equal(ask.kind, 'ask')
+
+    const { script } = buildRemoteBootstrapScript({ dshVersion: '0.2.2-rc.5', remotePort: 3080, localPort: 54321 })
+    assert.ok(script.includes(`NODE_SHA256_X64='${NODE_TARBALL_SHA256['v24.14.0'].x64}'`))
+    assert.ok(script.includes(`NODE_SHA256_ARM64='${NODE_TARBALL_SHA256['v24.14.0'].arm64}'`))
+    assert.ok(script.includes('ACTUAL_SHA256'))
+    const unpinned = buildRemoteBootstrapScript({ dshVersion: '0.2.2-rc.5', remotePort: 3080, localPort: 54321, nodeFallbackVersion: 'v99.0.0' }).script
+    assert.ok(unpinned.includes("NODE_SHA256_X64=''"), 'Unpinned Node versions carry no digest and are refused at install time')
+    assert.throws(() => buildRemoteBootstrapScript({ dshVersion: '0.2.2-rc.5', remotePort: 3080, localPort: 54321, nodeFallbackVersion: "v1'; rm -rf ~" }))
+
+    const bridge = new RemoteWorkspaceBridge({})
+    assert.equal(await bridge.tryProxyRawHttpRequest({ url: '/api/session/uploadFileBinary?sessionId=x', method: 'GET', headers: {} }, {}), false)
+
+    // Feed-follower fallback only applies while no merged follower stream is open (no echo duplicates).
+    const pushed = []
+    const localFollower = { push: (f) => pushed.push(f) }
+    bridge.attachedWorkspaceFeed = { followers: new Set([localFollower]) }
+    bridge._broadcastWorkspaceFrame({ type: 'upsert' })
+    assert.equal(pushed.length, 1, 'Pre-existing follower receives remote frames while no merged stream exists')
+    const merged = []
+    bridge.workspaceFollowers.add({ push: (f) => merged.push(f), end: () => {} })
+    bridge._broadcastWorkspaceFrame({ type: 'upsert' })
+    assert.equal(pushed.length, 1, 'Local feed followers are skipped once a merged stream exists')
+    assert.equal(merged.length, 1)
+    bridge.dispose()
+    assert.equal(bridge.attachedWorkspaceFeed, null)
   }
 
   // 13. MinimalWsClient real loopback RFC 6455 handshake & frame exchange test

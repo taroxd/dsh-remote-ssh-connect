@@ -106,6 +106,29 @@ export function extractSessionIdFromArgs(args) {
 }
 
 /**
+ * Normalize a live `session/control` projection frame to the current wire shape
+ * `{ type: 'projection', sessionId, seq, changes: { key, val }[] }`
+ * (see the `v0.2.2-alpha.2/projection-event-frames` upgrade guide).
+ * A pre-0.2.2 single-key frame `{ key, value, seq }` is converted so local clients
+ * only ever receive the current shape. Returns `null` for an unusable frame.
+ * @param {object} frame
+ * @returns {{ type: 'projection', sessionId: string, seq: number, changes: { key: string, val: unknown }[] } | null}
+ */
+export function normalizeProjectionFrame(frame) {
+  if (!frame || typeof frame !== 'object' || typeof frame.sessionId !== 'string') return null
+  const seq = typeof frame.seq === 'number' ? frame.seq : 0
+  let changes
+  if (Array.isArray(frame.changes)) {
+    changes = frame.changes.filter((c) => c && typeof c === 'object' && typeof c.key === 'string')
+  } else if (typeof frame.key === 'string') {
+    changes = [{ key: frame.key, val: frame.value }]
+  } else {
+    return null
+  }
+  return { type: 'projection', sessionId: frame.sessionId, seq, changes }
+}
+
+/**
  * Create a RemoteError-compatible Error instance that TypertGateway's `remoteErrorOf` / `rpcFailure`
  * recognizes or forwards cleanly.
  */
@@ -987,15 +1010,18 @@ export class RemoteHostGatewayClient {
             }
             this.bridge._handleRemoteControlBaseline(this.host)
           } else if (frame.type === 'projection' && typeof frame.sessionId === 'string') {
-            const existing = this.remoteProjections.get(frame.sessionId) ?? { asOfSeq: frame.seq ?? 0, values: {} }
-            this.remoteProjections.set(frame.sessionId, {
-              asOfSeq: frame.seq ?? existing.asOfSeq,
-              values: {
-                ...existing.values,
-                ...(frame.changes ?? {}),
-              },
+            const normalized = normalizeProjectionFrame(frame)
+            if (!normalized) continue
+            const existing = this.remoteProjections.get(normalized.sessionId) ?? { asOfSeq: normalized.seq, values: {} }
+            const values = { ...existing.values }
+            for (const change of normalized.changes) {
+              values[change.key] = change.val
+            }
+            this.remoteProjections.set(normalized.sessionId, {
+              asOfSeq: normalized.seq,
+              values,
             })
-            this.bridge._handleRemoteControlProjection(this.host, frame)
+            this.bridge._handleRemoteControlProjection(this.host, normalized)
           }
         }
       } catch {
@@ -1153,6 +1179,8 @@ export class RemoteWorkspaceBridge {
     this.attachedGateway = null
     this.attachedWorkspaceFeed = null
     this.attachedControlState = null
+    /** @type {(() => void) | null} restores `workspaceController.feed.baseline` */
+    this._restoreFeedBaseline = null
     /** @type {Map<string, { ms: number, sig: string }>} */
     this._projectedUpdatedAtState = new Map()
     /** @type {Set<string>} */
@@ -1163,6 +1191,16 @@ export class RemoteWorkspaceBridge {
    * Attach live Host controllers (`typertGateway`, `workspaceController`, `sessionController`) so that
    * even browser tabs whose WebSocket streams opened before this plugin initialized receive real-time
    * `workspace/follow`, `session/control`, and `$events` frames.
+   *
+   * Compatibility note: DSH exposes no public extension point for federating Gateway streams (the
+   * `/api` RPC channel admits a single interceptor, already owned by `typertGateway`). This bridge
+   * therefore relies on these non-public members, verified against DSH 0.2.2-rc.5; every access is
+   * feature-detected so a missing member degrades to "no federation" instead of throwing:
+   * - `typertGateway.dispatchRpc` / `openWireStream` (wrapped in index.js, restored on dispose)
+   * - `typertGateway.remoteEventClients` (fallback delivery to pre-existing `$events` streams)
+   * - `workspaceController.feed.baseline` (wrapped here, restored by `detachHostControllers`)
+   * - `workspaceController.feed.followers` / `sessionController.controlState.streams`
+   *   (fallback delivery to pre-existing streams only while no merged stream is open)
    */
   attachHostControllers({ gateway, workspaceController, sessionController } = {}) {
     if (gateway) this.attachedGateway = gateway
@@ -1178,7 +1216,10 @@ export class RemoteWorkspaceBridge {
           }
         }
         if (typeof workspaceController.feed.baseline === 'function' && !workspaceController.feed._rcBaselineWrapped) {
-          const origBaseline = workspaceController.feed.baseline.bind(workspaceController.feed)
+          const feed = workspaceController.feed
+          const hadOwnBaseline = Object.prototype.hasOwnProperty.call(feed, 'baseline')
+          const ownBaseline = hadOwnBaseline ? feed.baseline : undefined
+          const origBaseline = feed.baseline.bind(feed)
           const patchedBaseline = () => {
             const raw = origBaseline()
             const localItems = (raw?.items ?? []).filter((w) => parseLocalWorkspaceId(w.workspaceId) === null)
@@ -1194,8 +1235,14 @@ export class RemoteWorkspaceBridge {
             }
           }
           patchedBaseline._rcBaselineWrapped = true
-          workspaceController.feed.baseline = patchedBaseline
-          workspaceController.feed._rcBaselineWrapped = true
+          feed.baseline = patchedBaseline
+          feed._rcBaselineWrapped = true
+          this._restoreFeedBaseline = () => {
+            if (feed.baseline !== patchedBaseline) return
+            if (hadOwnBaseline) feed.baseline = ownBaseline
+            else delete feed.baseline
+            delete feed._rcBaselineWrapped
+          }
         }
       } catch {}
       this.publishAllSyncedWorkspacesToLiveFollowers()
@@ -1203,6 +1250,23 @@ export class RemoteWorkspaceBridge {
     if (sessionController?.controlState) {
       this.attachedControlState = sessionController.controlState
     }
+  }
+
+  /**
+   * Undo `attachHostControllers`: restore the wrapped workspace feed baseline and drop
+   * references to Host internals so a disposed plugin leaves no live hooks behind.
+   * @param {{ gateway?: boolean, workspaceController?: boolean, sessionController?: boolean }} [which]
+   */
+  detachHostControllers({ gateway = true, workspaceController = true, sessionController = true } = {}) {
+    if (gateway) this.attachedGateway = null
+    if (workspaceController) {
+      try {
+        this._restoreFeedBaseline?.()
+      } catch {}
+      this._restoreFeedBaseline = null
+      this.attachedWorkspaceFeed = null
+    }
+    if (sessionController) this.attachedControlState = null
   }
 
   publishAllSyncedWorkspacesToLiveFollowers() {
@@ -1964,13 +2028,16 @@ export class RemoteWorkspaceBridge {
     for (const q of this.workspaceFollowers) {
       q.push(frame)
     }
-    if (this.attachedWorkspaceFeed?.followers) {
+    // Fallback for `workspace/follow` streams opened before the gateway interception was installed
+    // (e.g. pages already open when the plugin is enabled). Once any merged follower exists, every
+    // local feed follower may be the one backing a merged stream; pushing remote frames into it would
+    // echo them back through `_openMergedWorkspaceFollowStream` (duplicates and a polluted local
+    // baseline), so the fallback only applies while no merged follower is open, as for control/events.
+    if (this.workspaceFollowers.size === 0 && this.attachedWorkspaceFeed?.followers) {
       for (const follower of this.attachedWorkspaceFeed.followers) {
-        if (!this._managedFollowers?.has(follower)) {
-          try {
-            follower.push(frame)
-          } catch {}
-        }
+        try {
+          follower.push(frame)
+        } catch {}
       }
     }
   }
@@ -2510,10 +2577,15 @@ export class RemoteWorkspaceBridge {
 
   /**
    * Proxy raw binary file uploads (`/api/session/uploadFileBinary?sessionId=...`) when `sessionId`
-   * belongs to a connected remote host.
+   * belongs to a connected remote host. Called only from the `connection/request` waterfall, which
+   * client-connection runs after `connection.admit(req)` accepted the request, so the caller is an
+   * authenticated same-origin browser of this Host.
    */
   async tryProxyRawHttpRequest(req, res) {
     if (!req.url || !req.url.startsWith('/api/session/uploadFileBinary')) {
+      return false
+    }
+    if ((req.method || 'GET').toUpperCase() !== 'POST') {
       return false
     }
     let parsed
@@ -2549,7 +2621,7 @@ export class RemoteWorkspaceBridge {
 
     const targetUrl = `${client.baseOrigin}${parsed.pathname}${parsed.search}`
     const upstreamRes = await client.fetchImpl(targetUrl, {
-      method: req.method || 'POST',
+      method: 'POST',
       headers: {
         host: client.parsedUrl.host,
         'content-type': req.headers['content-type'] || 'application/octet-stream',
@@ -2568,6 +2640,7 @@ export class RemoteWorkspaceBridge {
   }
 
   dispose() {
+    this.detachHostControllers()
     for (const client of this.hostClients.values()) {
       client.dispose()
     }

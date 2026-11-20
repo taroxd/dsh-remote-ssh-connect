@@ -145,6 +145,7 @@ function registerGatewayFederation(ctx, manager) {
       return () => {
         gw.dispatchRpc = origDispatchRpc
         gw.openWireStream = origOpenWireStream
+        manager.workspaceBridge.detachHostControllers({ gateway: true, workspaceController: false, sessionController: false })
       }
     }, 'remote-ssh-connect: typertGateway federation')
   })
@@ -153,7 +154,9 @@ function registerGatewayFederation(ctx, manager) {
     scope.effect(() => {
       const wsCtrl = unwrapCordisService(scope.workspaceController)
       manager.workspaceBridge.attachHostControllers({ workspaceController: wsCtrl })
-      return () => {}
+      return () => {
+        manager.workspaceBridge.detachHostControllers({ gateway: false, workspaceController: true, sessionController: false })
+      }
     }, 'remote-ssh-connect: workspaceController federation')
   })
 
@@ -161,10 +164,15 @@ function registerGatewayFederation(ctx, manager) {
     scope.effect(() => {
       const sessCtrl = unwrapCordisService(scope.sessionController)
       manager.workspaceBridge.attachHostControllers({ sessionController: sessCtrl })
-      return () => {}
+      return () => {
+        manager.workspaceBridge.detachHostControllers({ gateway: false, workspaceController: false, sessionController: true })
+      }
     }, 'remote-ssh-connect: sessionController federation')
   })
 
+  // `connection/request` is a waterfall that client-connection runs only after `connection.admit(req)`
+  // has accepted the request (Host/Origin fence plus browser auth cookie), so this proxy only ever
+  // sees authenticated same-origin API requests. Requests for local sessions fall through to `next()`.
   ctx.inject(['connection'], (scope) => {
     if (typeof scope.on === 'function') {
       scope.effect(() => scope.on('connection/request', async (req, res, next) => {
@@ -178,11 +186,130 @@ function registerGatewayFederation(ctx, manager) {
   })
 }
 
-function registerAgentTool(ctx, manager) {
+const TOOL_NAME = 'remote_ssh_connect'
+
+/** Actions that only read local or remote state; every other action needs a runtime user approval. */
+const READ_ONLY_TOOL_ACTIONS = new Set([
+  'list_hosts',
+  'get_status',
+  'list_local_plugins',
+  'list_remote_workspaces',
+  'list_synced_workspaces',
+])
+
+/**
+ * Describe a side-effecting `remote_ssh_connect` call for the approval prompt.
+ * Returns `null` for read-only actions, which run without approval.
+ * @param {object} args - parsed tool arguments
+ * @returns {{ reason: string, displayReason: { en: string, zh: string } } | null}
+ */
+export function describeToolApproval(args) {
+  const action = typeof args?.action === 'string' ? args.action : ''
+  if (READ_ONLY_TOOL_ACTIONS.has(action)) return null
+  const host = typeof args?.host === 'string' && args.host ? args.host : '?'
+  const port = Number.isInteger(args?.remotePort) ? String(args.remotePort) : 'configured'
+  switch (action) {
+    case 'kill_remote_port':
+      return {
+        reason: `remote_ssh_connect: terminate the process listening on remote port ${port} of host "${host}" (kill -TERM, then kill -KILL)`,
+        displayReason: {
+          en: `Terminate the process listening on port ${port} of remote host "${host}"`,
+          zh: `终止远程主机“${host}”上占用端口 ${port} 的进程`,
+        },
+      }
+    case 'sync_plugin': {
+      const plugin = typeof args?.pluginName === 'string' ? args.pluginName : '?'
+      const force = args?.force === true
+      return {
+        reason: `remote_ssh_connect: install local plugin "${plugin}" on host "${host}"${force ? ', overwriting a higher remote version' : ''}`,
+        displayReason: force
+          ? {
+            en: `Install plugin "${plugin}" on remote host "${host}", overwriting its higher remote version`,
+            zh: `将插件“${plugin}”安装到远程主机“${host}”，并覆盖远端更高的版本`,
+          }
+          : {
+            en: `Install plugin "${plugin}" on remote host "${host}"`,
+            zh: `将插件“${plugin}”安装到远程主机“${host}”`,
+          },
+      }
+    }
+    case 'configure_host':
+      return {
+        reason: `remote_ssh_connect: change saved connection settings of host "${host}"`,
+        displayReason: {
+          en: `Change the saved connection settings of remote host "${host}"`,
+          zh: `修改远程主机“${host}”的连接配置`,
+        },
+      }
+    case 'connect':
+      return {
+        reason: `remote_ssh_connect: open an SSH connection to "${host}" and install/start DSH on it`,
+        displayReason: {
+          en: `Connect to remote host "${host}" over SSH and install/start DSH there`,
+          zh: `通过 SSH 连接远程主机“${host}”，并在其上安装/启动 DSH`,
+        },
+      }
+    case 'disconnect':
+      return {
+        reason: `remote_ssh_connect: disconnect host "${host}" and stop its remote DSH`,
+        displayReason: {
+          en: `Disconnect remote host "${host}" and stop its remote DSH`,
+          zh: `断开远程主机“${host}”并停止其远端 DSH`,
+        },
+      }
+    case 'open_browser':
+      return {
+        reason: `remote_ssh_connect: open the remote DSH of host "${host}" in the default browser`,
+        displayReason: {
+          en: `Open the remote DSH of "${host}" in the default browser`,
+          zh: `在默认浏览器中打开“${host}”的远端 DSH`,
+        },
+      }
+    case 'sync_workspace':
+      return {
+        reason: `remote_ssh_connect: synchronize a remote workspace of host "${host}" into the local sidebar (may create the remote directory)`,
+        displayReason: {
+          en: `Synchronize a remote workspace of "${host}" into the local Workspaces list`,
+          zh: `将“${host}”上的远程工作区同步到本地工作区列表`,
+        },
+      }
+    case 'remove_workspace': {
+      const id = typeof args?.localWorkspaceId === 'string' ? args.localWorkspaceId : '?'
+      return {
+        reason: `remote_ssh_connect: remove synchronized workspace "${id}" from the local sidebar`,
+        displayReason: {
+          en: `Remove synchronized workspace "${id}" from the local Workspaces list`,
+          zh: `从本地工作区列表移除已同步的工作区“${id}”`,
+        },
+      }
+    }
+    default:
+      return {
+        reason: `remote_ssh_connect: run action "${action}"`,
+        displayReason: {
+          en: `Run remote SSH action "${action}"`,
+          zh: `执行远程 SSH 操作“${action}”`,
+        },
+      }
+  }
+}
+
+export function registerAgentTool(ctx, manager) {
+  // Every side-effecting action asks the user through the DSH approval service before the tool body
+  // runs. The ask fails closed: without an approval answerer (or with the `never` policy) it is denied.
+  ctx.inject(['tools'], (scope) => {
+    scope.effect(() => scope.on('tools/pre-execute', (exec, next) => {
+      if (exec?.name !== TOOL_NAME) return next()
+      const approval = describeToolApproval(exec.arguments)
+      if (!approval) return next()
+      return Promise.resolve({ kind: 'ask', ...approval })
+    }), 'remote-ssh-connect: tool approval gate')
+  })
+
   ctx.inject(['tools'], (scope) => {
     scope.effect(() => scope.tools.register({
-      name: 'remote_ssh_connect',
-      description: 'Manage SSH remote DSH connections configured in ~/.ssh/config: list hosts and their connection statuses, configure per-host remotePort/localPort/profile, connect or disconnect a host, open a connected remote DSH in the default browser, terminate a conflicting process occupying the remote port, sync a local plugin to a connected remote host, or list/sync/remove remote workspaces. Interactive password/OTP entry remains user-only in the SSH Connections UI.',
+      name: TOOL_NAME,
+      description: 'Manage SSH remote DSH connections configured in ~/.ssh/config: list hosts and their connection statuses, configure per-host remotePort/localPort/profile, connect or disconnect a host, open a connected remote DSH in the default browser, terminate a conflicting process occupying the remote port, sync a local plugin to a connected remote host, or list/sync/remove remote workspaces. Every action other than the list_*/get_status reads asks the user for approval before it runs. Interactive password/OTP entry remains user-only in the SSH Connections UI.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -217,7 +344,7 @@ function registerAgentTool(ctx, manager) {
           },
           force: {
             type: 'boolean',
-            description: 'For sync_plugin: true only after the user explicitly confirms overwriting a higher remote plugin version.',
+            description: 'For sync_plugin: overwrite a higher remote plugin version. The approval prompt states the overwrite; set it only when the user asked for it.',
           },
           remoteWorkspaceId: {
             type: 'string',
@@ -507,6 +634,7 @@ export {
   RemoteHostGatewayClient,
   REMOTE_WS_PREFIX,
   extractSessionIdFromArgs,
+  normalizeProjectionFrame,
   createRemoteGatewayError,
 } from './src/remote-workspace-bridge.js'
 export {
@@ -519,6 +647,7 @@ export {
 export {
   buildRemoteBootstrapScript,
   buildKillRemotePortScript,
+  NODE_TARBALL_SHA256,
 } from './src/remote-script.js'
 export {
   openUrlInDefaultBrowser,

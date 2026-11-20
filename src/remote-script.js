@@ -5,6 +5,17 @@ import { gzipSync } from 'node:zlib'
 
 export const EVENT_PREFIX = 'DSH_RC_EVENT:'
 export const DEFAULT_NODE_FALLBACK_VERSION = 'v24.14.0'
+/**
+ * SHA-256 of the official Node.js Linux tarballs installed by the bootstrap script, copied from
+ * https://nodejs.org/dist/<version>/SHASUMS256.txt. The digest travels with the plugin (over SSH),
+ * so a tampered mirror download cannot pass verification.
+ */
+export const NODE_TARBALL_SHA256 = Object.freeze({
+  'v24.14.0': Object.freeze({
+    x64: 'dbf5b8665dec15e59e6359a517fefb47b23fdb9152d8def975b9bca3dfc6d355',
+    arm64: 'f44740cd218de8127f1c44c41510a3a740fa5c9c8d1cdce1c3bedada79f3cde7',
+  }),
+})
 export const SHIPPED_PROFILES = new Set(['web', 'acp', 'headless', 'sdk', 'sdk-minimal', 'desktop'])
 
 /**
@@ -102,6 +113,8 @@ printf '%s\\n' '${EVENT_PREFIX}{"type":"kill_result","ok":true}'
  * @param {number} [options.nodeMajorMin] - Minimum Node major version (default 24).
  * @param {number} [options.nodeMinorMin] - Minimum Node minor version (default 9).
  * @param {string} [options.nodeFallbackVersion] - Node version to install if none suitable exists.
+ * @param {{ x64?: string, arm64?: string }} [options.nodeTarballSha256] - SHA-256 of the Linux tarballs for
+ *   `nodeFallbackVersion`; required for versions not listed in `NODE_TARBALL_SHA256` (installation is refused otherwise).
  * @param {boolean} [options.forceInstallNode] - Force installing Node into ~/.dsh-remote-ssh-connect/node.
  * @param {string} [options.customDshTarballUrl] - Optional tarball/package spec override for testing.
  * @returns {{ script: string, sshCommand: string }}
@@ -131,6 +144,17 @@ export function buildRemoteBootstrapScript(options) {
   const nodeMajorMin = Number(options.nodeMajorMin ?? 24)
   const nodeMinorMin = Number(options.nodeMinorMin ?? 9)
   const nodeFallbackVersion = String(options.nodeFallbackVersion || DEFAULT_NODE_FALLBACK_VERSION)
+  if (!/^v\d+\.\d+\.\d+$/.test(nodeFallbackVersion)) {
+    throw new Error(`Invalid nodeFallbackVersion: ${JSON.stringify(nodeFallbackVersion)}`)
+  }
+  const nodeSha256 = { ...(NODE_TARBALL_SHA256[nodeFallbackVersion] ?? {}), ...(options.nodeTarballSha256 ?? {}) }
+  for (const [arch, digest] of Object.entries(nodeSha256)) {
+    if (!/^[0-9a-f]{64}$/.test(String(digest))) {
+      throw new Error(`Invalid SHA-256 for Node.js ${nodeFallbackVersion} ${arch}: ${JSON.stringify(digest)}`)
+    }
+  }
+  const nodeShaX64 = nodeSha256.x64 ?? ''
+  const nodeShaArm64 = nodeSha256.arm64 ?? ''
   const forceInstallNode = options.forceInstallNode === true ? '1' : '0'
   const dshPackageSpec = options.customDshTarballUrl
     ? String(options.customDshTarballUrl)
@@ -286,6 +310,8 @@ function detectPortOccupant(port) {
   let remoteLaunchToken = null;
   let remoteAuthCookie = null;
   let rpcCallSeq = 0;
+  // First diagnostic line of a failed dsh-hmr entry; without HMR the PluginManager cannot replace running bundles.
+  let hmrFailure = null;
   let lastPingAt = Date.now();
   const initialPpid = process.ppid;
 
@@ -376,6 +402,9 @@ function detectPortOccupant(port) {
           initializedFromWeb: needsInit,
         });
         return;
+      }
+      if (/^hmr \\(@deepseek-ai\\/dsh-hmr\\):/.test(trimmed)) {
+        hmrFailure = trimmed;
       }
       if (/EADDRINUSE|address already in use/i.test(trimmed)) {
         const occ = detectPortOccupant(remotePort);
@@ -666,6 +695,21 @@ function detectPortOccupant(port) {
 
     function expectPluginManagerResult(res, method) {
       if (!res) throw new Error('Remote PluginManager ' + method + ' request failed.');
+      const code = !res.ok
+        ? (res.error && res.error.code)
+        : (res.value && res.value.application === 'failed' && res.value.error && res.value.error.code);
+      if (code === 'stop-profile') {
+        // The PluginManager replaces a running bundle only through HMR; without it the bundle stays loaded.
+        throw new Error(
+          'Remote DSH runs without hot reload (HMR), so its PluginManager cannot replace the running bundle ' + pkgName + '.'
+          + (hmrFailure
+            ? ' HMR failed to start: ' + hmrFailure.slice(0, 300) + '.'
+            : '')
+          + (hmrFailure && /ENOSPC/.test(hmrFailure)
+            ? ' Raise the inotify watcher limit on the remote host (for example: sudo sysctl fs.inotify.max_user_watches=524288), then disconnect and reconnect.'
+            : ' Make sure the remote profile loads @deepseek-ai/dsh-hmr, then disconnect and reconnect.'),
+        );
+      }
       if (!res.ok) {
         const e = res.error || {};
         throw new Error('Remote PluginManager ' + method + ' failed: ' + String(e.message || e.code || 'unknown error'));
@@ -863,6 +907,8 @@ MAX_VERSIONS=${maxVersions}
 NODE_MAJOR_MIN=${nodeMajorMin}
 NODE_MINOR_MIN=${nodeMinorMin}
 NODE_FALLBACK_VER='${nodeFallbackVersion}'
+NODE_SHA256_X64='${nodeShaX64}'
+NODE_SHA256_ARM64='${nodeShaArm64}'
 FORCE_INSTALL_NODE=${forceInstallNode}
 DSH_PACKAGE_SPEC=${JSON.stringify(dshPackageSpec)}
 
@@ -968,13 +1014,26 @@ if [ -z "$SELECTED_NODE" ]; then
     emit_json '{"type":"phase","phase":"installing_node"}'
     RAW_ARCH=$(uname -m)
     case "$RAW_ARCH" in
-      x86_64|amd64) NODE_ARCH="x64" ;;
-      aarch64|arm64) NODE_ARCH="arm64" ;;
+      x86_64|amd64) NODE_ARCH="x64"; NODE_EXPECTED_SHA256="$NODE_SHA256_X64" ;;
+      aarch64|arm64) NODE_ARCH="arm64"; NODE_EXPECTED_SHA256="$NODE_SHA256_ARM64" ;;
       *)
         emit_json "{\\"type\\":\\"error\\",\\"message\\":\\"Unsupported Linux architecture: $RAW_ARCH\\"}"
         exit 1
         ;;
     esac
+
+    if [ -z "$NODE_EXPECTED_SHA256" ]; then
+      emit_json "{\\"type\\":\\"error\\",\\"message\\":\\"No pinned SHA-256 for Node.js $NODE_FALLBACK_VER linux-$NODE_ARCH; refusing to install an unverified Node.js. Install Node.js >= $NODE_MAJOR_MIN.$NODE_MINOR_MIN on the remote host manually.\\"}"
+      exit 1
+    fi
+    if command -v sha256sum >/dev/null 2>&1; then
+      SHA256_CMD="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+      SHA256_CMD="shasum -a 256"
+    else
+      emit_json "{\\"type\\":\\"error\\",\\"message\\":\\"Neither sha256sum nor shasum is available to verify the Node.js download. Install Node.js >= $NODE_MAJOR_MIN.$NODE_MINOR_MIN on the remote host manually.\\"}"
+      exit 1
+    fi
 
     mkdir -p "$BASE_DIR/node"
     NODE_STAGE="$BASE_DIR/node/.staging-$$"
@@ -985,22 +1044,30 @@ if [ -z "$SELECTED_NODE" ]; then
     DOWNLOADED=0
     for MIRROR_BASE in "https://npmmirror.com/mirrors/node" "https://nodejs.org/dist"; do
       URL="$MIRROR_BASE/$NODE_FALLBACK_VER/$TARBALL_NAME"
+      rm -f "$NODE_STAGE/node.tar.gz"
+      FETCHED=0
       if command -v curl >/dev/null 2>&1; then
         if curl -fsSL --connect-timeout 15 --max-time 300 "$URL" -o "$NODE_STAGE/node.tar.gz" 2>/dev/null; then
-          DOWNLOADED=1
-          break
+          FETCHED=1
         fi
       elif command -v wget >/dev/null 2>&1; then
         if wget -q -T 30 -O "$NODE_STAGE/node.tar.gz" "$URL" 2>/dev/null; then
+          FETCHED=1
+        fi
+      fi
+      if [ "$FETCHED" = "1" ]; then
+        ACTUAL_SHA256=$($SHA256_CMD "$NODE_STAGE/node.tar.gz" 2>/dev/null | cut -d ' ' -f 1)
+        if [ "$ACTUAL_SHA256" = "$NODE_EXPECTED_SHA256" ]; then
           DOWNLOADED=1
           break
         fi
+        printf '%s\\n' "Node.js download from $MIRROR_BASE failed SHA-256 verification; trying the next source" >&2
       fi
     done
 
     if [ "$DOWNLOADED" != "1" ]; then
       rm -rf "$NODE_STAGE"
-      emit_json '{"type":"error","message":"Failed to download Node.js distribution for remote host"}'
+      emit_json '{"type":"error","message":"Failed to download a Node.js distribution with a matching SHA-256 for the remote host"}'
       exit 1
     fi
 
