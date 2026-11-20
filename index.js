@@ -528,6 +528,4 @@ export {
   classifyInstallSource,
   listLocalPlugins,
   packLocalPluginDirectory,
-  buildRemoteCheckPluginScript,
-  buildRemoteInstallPluginScript,
 } from './src/plugin-sync.js'

@@ -444,7 +444,6 @@ export class RemoteConnectionManager {
     const sshArgs = [
       '-T',
       '-o', 'BatchMode=no',
-      '-o', 'StrictHostKeyChecking=accept-new',
       '-o', 'ExitOnForwardFailure=yes',
       '-o', 'ServerAliveInterval=10',
       '-o', 'ServerAliveCountMax=6',
@@ -538,7 +537,6 @@ export class RemoteConnectionManager {
         session.status = 'connected'
         session.phase = 'ready'
         session.url = ev.url || `http://127.0.0.1:${allocatedLocalPort}/`
-        session.tunnelAuthCookie = null
         session.remotePid = ev.pid ?? null
         session.connectedAt = session.connectedAt ?? Date.now()
         if (typeof ev.initializedFromWeb === 'boolean') {
@@ -808,7 +806,6 @@ export class RemoteConnectionManager {
     const sshArgs = [
       '-T',
       '-o', 'BatchMode=no',
-      '-o', 'StrictHostKeyChecking=accept-new',
       '-o', 'ConnectTimeout=15',
       ...this.extraSshArgs,
       '--',
@@ -907,88 +904,6 @@ export class RemoteConnectionManager {
   }
 
   /**
-   * Call the remote DSH server's `pluginManager` service over the local SSH port-forwarding tunnel (`session.url`).
-   * Used to ensure live HMR unloading/reloading and `plugin-manager/changed` notifications even if the remote
-   * supervisor was started by an earlier version of `dsh-remote-ssh-connect`.
-   *
-   * @param {object} session
-   * @param {string} method
-   * @param {object} [args]
-   * @param {number} [timeoutMs]
-   */
-  async _callRemotePluginManagerViaTunnel(session, method, args = {}, timeoutMs = 180_000) {
-    if (!session || session.status !== 'connected' || !session.url || typeof fetch !== 'function') {
-      return null
-    }
-    let parsedUrl
-    try {
-      parsedUrl = new URL(session.url)
-    } catch {
-      return null
-    }
-    const baseOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      if (!session.tunnelAuthCookie) {
-        try {
-          const authRes = await fetch(session.url, {
-            method: 'GET',
-            redirect: 'manual',
-            headers: { host: parsedUrl.host },
-            signal: AbortSignal.timeout(8_000),
-          })
-          const setCookies = typeof authRes.headers?.getSetCookie === 'function'
-            ? authRes.headers.getSetCookie()
-            : (authRes.headers?.get?.('set-cookie') ? [authRes.headers.get('set-cookie')] : [])
-          for (const rawCookie of setCookies) {
-            const pair = String(rawCookie).split(';')[0].trim()
-            if (pair.startsWith('dsh-auth-')) {
-              session.tunnelAuthCookie = pair
-              break
-            }
-          }
-        } catch {
-          return null
-        }
-      }
-      if (!session.tunnelAuthCookie) return null
-
-      try {
-        const res = await fetch(`${baseOrigin}/api/pluginManager/${method}`, {
-          method: 'POST',
-          headers: {
-            host: parsedUrl.host,
-            'content-type': 'application/json',
-            cookie: session.tunnelAuthCookie,
-          },
-          body: JSON.stringify({
-            type: 'client-request',
-            rpcId: randomUUID(),
-            method: `pluginManager/${method}`,
-            payload: { args },
-          }),
-          signal: AbortSignal.timeout(timeoutMs),
-        })
-        if (res.status === 401 || res.status === 403) {
-          session.tunnelAuthCookie = null
-          continue
-        }
-        if (!res.ok) return null
-        const data = await res.json()
-        if (data?.result?.ok === true) {
-          return { ok: true, value: data.result.value }
-        }
-        if (data?.result?.ok === false) {
-          return { ok: false, error: data.result.error }
-        }
-        return null
-      } catch {
-        return null
-      }
-    }
-    return null
-  }
-
-  /**
    * Synchronize a locally installed plugin to a connected remote host using the same
    * installation method (`npm`, `github`, or `local`) over the existing long-lived SSH connection.
    *
@@ -1066,14 +981,8 @@ export class RemoteConnectionManager {
       }
     }
 
-    // Step 4: If already installed on remote, ask the live remote PluginManager over the tunnel to unload & remove first
-    if (remoteInstalled) {
-      await this._callRemotePluginManagerViaTunnel(sess, 'removeBundle', {
-        name: localPlugin.name,
-      })
-    }
-
-    // Step 5: Remove any remaining copy (if needed) and install on remote via the active SSH channel
+    // Step 4: Remove any existing remote copy and install through the remote supervisor, which drives the
+    // live remote PluginManager over the active SSH channel. Failures surface as errors.
     const syncedResult = await this._sendSessionRpc(
       sess,
       'install_plugin',
@@ -1089,14 +998,6 @@ export class RemoteConnectionManager {
       base64Payload,
     )
 
-    // Step 6: If the remote supervisor did not already apply the bundle via live PluginManager, trigger live enable/reload
-    if (!syncedResult?.appliedViaPluginManager) {
-      await this._callRemotePluginManagerViaTunnel(sess, 'setBundleEnabled', {
-        name: localPlugin.name,
-        enabled: true,
-      })
-    }
-
     return {
       status: 'synced',
       host: hostKey,
@@ -1108,6 +1009,7 @@ export class RemoteConnectionManager {
       installedVersion: syncedResult?.installedVersion || localPlugin.version,
       previousRemoteVersion: remoteVersion,
       reinstalled: remoteInstalled,
+      restartRequired: Boolean(syncedResult?.restartRequired),
     }
   }
 

@@ -139,6 +139,7 @@ window.__ModuleLoader__.load({
       btnSyncingPlugin: '正在同步安装…',
       syncSuccessFresh: '已通过 {source} 将插件 {name} (v{version}) 同步安装到远端（Profile: {profile}）',
       syncSuccessReinstalled: '已删除远端原有版本并重新通过 {source} 安装插件 {name} (v{version})',
+      syncRestartRequired: '远端 DSH 需要重启后此插件才会生效（断开并重新连接即可）。',
 
       syncWorkspaceLabel: '远程工作区',
       syncWorkspaceLoading: '正在读取远端工作区列表…',
@@ -297,6 +298,7 @@ window.__ModuleLoader__.load({
       btnSyncingPlugin: 'Syncing…',
       syncSuccessFresh: 'Synced and installed {name} (v{version}) via {source} on remote profile "{profile}"',
       syncSuccessReinstalled: 'Removed existing remote copy and reinstalled {name} (v{version}) via {source}',
+      syncRestartRequired: 'The remote DSH must restart before this plugin takes effect (disconnect and reconnect).',
 
       syncWorkspaceLabel: 'Remote workspace',
       syncWorkspaceLoading: 'Loading remote workspaces…',
@@ -449,6 +451,7 @@ window.__ModuleLoader__.load({
 [data-row-key^="workspace:remote:"]:not([data-rc-status="connected"]) > span:last-child > *:not(:first-child):not(.dsh-rc-inline-connect-btn) {
   display: none !important;
 }
+/* Mirrors the built-in sidebar row icon button: no hover background, icon color only. */
 .dsh-rc-inline-connect-btn {
   flex: none;
   display: inline-flex;
@@ -460,13 +463,16 @@ window.__ModuleLoader__.load({
   padding: 0;
   border: none;
   border-radius: var(--dsw-radius-xs, 4px);
-  background: transparent;
-  color: var(--dsw-alias-brand-primary);
+  background: none;
+  color: var(--dsw-alias-label-tertiary);
   cursor: pointer;
 }
+.dsh-rc-inline-connect-btn:focus-visible {
+  outline-offset: -2px;
+}
 .dsh-rc-inline-connect-btn:hover:not(:disabled) {
-  background-color: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-brand-primary);
+  background: none;
+  color: var(--dsw-alias-label-primary);
 }
 .dsh-rc-inline-connect-btn:disabled {
   opacity: 0.55;
@@ -1796,41 +1802,21 @@ window.__ModuleLoader__.load({
         setSyncingPlugin(true)
         setSyncNotice(null)
         setSyncError(null)
+        const describeSync = (r) => {
+          const srcLabel = sourceKindText(r.sourceKind, t)
+          const version = r.installedVersion || r.localVersion
+          const base = r.reinstalled
+            ? t('syncSuccessReinstalled', { name: r.pluginName, version, source: srcLabel })
+            : t('syncSuccessFresh', { name: r.pluginName, version, source: srcLabel, profile: r.profile || 'web' })
+          return r.restartRequired ? `${base} ${t('syncRestartRequired')}` : base
+        }
         try {
           const res = await onSyncPlugin(item.alias, pluginNameToSync, false, (confirmedResult) => {
-            const srcLabel = sourceKindText(confirmedResult.sourceKind, t)
-            setSyncNotice(
-              confirmedResult.reinstalled
-                ? t('syncSuccessReinstalled', {
-                  name: confirmedResult.pluginName,
-                  version: confirmedResult.installedVersion || confirmedResult.localVersion,
-                  source: srcLabel,
-                })
-                : t('syncSuccessFresh', {
-                  name: confirmedResult.pluginName,
-                  version: confirmedResult.installedVersion || confirmedResult.localVersion,
-                  source: srcLabel,
-                  profile: confirmedResult.profile || 'web',
-                }),
-            )
+            setSyncNotice(describeSync(confirmedResult))
             void loadRemoteWorkspaces()
           })
           if (res && res.status === 'synced') {
-            const srcLabel = sourceKindText(res.sourceKind, t)
-            setSyncNotice(
-              res.reinstalled
-                ? t('syncSuccessReinstalled', {
-                  name: res.pluginName,
-                  version: res.installedVersion || res.localVersion,
-                  source: srcLabel,
-                })
-                : t('syncSuccessFresh', {
-                  name: res.pluginName,
-                  version: res.installedVersion || res.localVersion,
-                  source: srcLabel,
-                  profile: res.profile || 'web',
-                }),
-            )
+            setSyncNotice(describeSync(res))
             void loadRemoteWorkspaces()
           }
         } catch (err) {
@@ -2949,10 +2935,6 @@ window.__ModuleLoader__.load({
         function decorateRemoteWorkspaceRowsInDom() {
           if (typeof document === 'undefined') return
           try {
-            // Remove any legacy separate Remote Workspaces mount node if present from a prior version
-            const legacyMount = document.getElementById('dsh-rc-remote-workspaces-mount')
-            if (legacyMount) legacyMount.remove()
-
             const rows = document.querySelectorAll('[data-row-key^="workspace:remote:"]')
             for (const row of rows) {
               const rowKey = row.getAttribute('data-row-key') || ''

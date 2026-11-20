@@ -1,6 +1,6 @@
 {
   "name": "dsh-remote-ssh-connect",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "type": "module",
   "description": "Connect to remote Linux hosts over SSH, provision matching DSH versions in ~/.dsh-remote-ssh-connect, sync local plugins and remote workspaces for direct local control, and forward ports for browser access.",
   "license": "MIT",

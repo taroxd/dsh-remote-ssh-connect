@@ -35,7 +35,16 @@
 4. **SSH Authentication Modal**:
    - Secret inputs (`password`, `passphrase`) render an inline eye toggle button (`.dsh-rc-eye-btn`) on the right side of the input (`EyeClosedIcon` when hidden, `EyeOpenIcon` when revealed). Plain-text prompts (`otp`, `confirm`) omit the toggle.
 
-5. **Code & Documentation Language Policy**:
+5. **Remote Host Side Effects (keep them minimal)**:
+   - Plugin sync removes and installs bundles only through the remote DSH's live PluginManager (`removeBundle` / `installBundle`) driven by the supervisor. It never edits the remote profile `package.json`, never writes `.npmrc` or `pnpm-workspace.yaml`, never auto-approves build scripts (`approvedBuilds` / `dangerouslyAllowAllBuilds`), and never restarts the remote DSH. A `restart-required` outcome is reported to the user; failures (including pending build approvals) surface as errors.
+   - Local plugins keep their local install protocol on the remote (`link:` stays `link:`, `file:` stays `file:`). For `link:` directories with dependencies, the supervisor runs `pnpm install --prod --ignore-scripts` inside the synced copy, because `link:` does not install the target's own dependencies.
+   - The packed plugin archive contains the plugin's files only; nothing is injected.
+   - The remote DSH child receives the supervisor's environment unchanged (plus `NO_COLOR`); do not inject variables for the benefit of specific third-party plugins. Plugin load-order problems belong in the plugin itself.
+   - `prune_old_versions` deletes only directories in `~/.dsh-remote-ssh-connect` that carry both `.install-complete` and `node_modules/@deepseek-ai/dsh/package.json`.
+   - Terminating a remote port occupant targets only the process currently listening on that port (`ss` / `lsof` / `fuser`); no PID files are written or trusted.
+   - SSH host key checking follows the user's own `~/.ssh/config`; the plugin does not override `StrictHostKeyChecking`.
+
+6. **Code & Documentation Language Policy**:
    - All source code comments, commit messages, `README.md`, `AGENTS.md`, and `docs/DETAIL.md` must be written strictly in English (no Chinese characters).
    - Chinese text is only permitted in localized UI dictionaries (`zh` in `client.js`, `locale/zh.json`, `docs/DETAIL.zh.md`, and prompt-classification regexes in `src/askpass-server.js`).
 

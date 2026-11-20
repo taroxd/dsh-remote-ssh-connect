@@ -188,6 +188,16 @@ Match host 203.0.113.*
     assert.equal(supervisorJs.includes('callRemotePluginManager'), true)
     assert.equal(supervisorJs.includes('removeBundle'), true)
     assert.equal(supervisorJs.includes('installBundle'), true)
+    // Plugin installs go through the live PluginManager only: no build-script auto-approval,
+    // no dangerouslyAllowAllBuilds, no injected .npmrc, no plugin-environment overrides.
+    assert.equal(supervisorJs.includes('approvedBuilds'), false)
+    assert.equal(supervisorJs.includes('dangerouslyAllowAllBuilds'), false)
+    assert.equal(supervisorJs.includes('.npmrc'), false)
+    assert.equal(supervisorJs.includes('DSH_INSTALL_DIR'), false)
+    assert.equal(script.includes('DSH_INSTALL_DIR'), false)
+    assert.equal(supervisorJs.includes('recoverIdlePlugins'), false)
+    // Version pruning only touches directories carrying this script's install marker.
+    assert.match(script, /\.install-complete" \] && \[ -f "\$D\/node_modules\/@deepseek-ai\/dsh\/package\.json"/)
     assert.equal(script.includes('MAX_VERSIONS=3'), true)
     assert.equal(script.includes('bash -lic'), true)
     assert.equal(script.includes('.bashrc'), true)
@@ -201,6 +211,8 @@ Match host 203.0.113.*
 
     const killCmd = buildKillRemotePortScript(3080)
     assert.equal(killCmd.startsWith('mkdir -p ~/.dsh-remote-ssh-connect && printf %s '), true)
+    const killScript = Buffer.from(killCmd.split(' ')[5], 'base64').toString('utf8')
+    assert.equal(killScript.includes('.pid'), false, 'Kill script must only target the live port listener, never a stale saved PID')
   }
 
   // 6. Browser opener & fallback URL support
@@ -750,6 +762,7 @@ Match host 203.0.113.*
                 installCalls.push({
                   pkgName: req.params.packageName,
                   sourceKind: req.params.sourceKind,
+                  localLinkPrefix: req.params.localLinkPrefix,
                   reinstall: req.params.reinstall,
                   payloadLen: rawB64.length,
                 })
@@ -785,23 +798,15 @@ Match host 203.0.113.*
         assert.equal(sshSpawnCount, 1, 'Only 1 SSH connection should be opened')
 
         // Case A: Installed on remote from npm (v1.0.0) while local is local directory source (v1.2.0) ->
-        // unloads & removes remote npm copy via live PluginManager, streams local archive, and enables new local bundle
+        // streams the local archive and asks the supervisor to reinstall it through the remote PluginManager
         const resLocal = await manager.syncPluginToHost('sync-box', { pluginName: 'my-local-bundle' })
         assert.equal(resLocal.status, 'synced')
         assert.equal(resLocal.sourceKind, 'local')
         assert.equal(resLocal.reinstalled, true)
         assert.equal(resLocal.previousRemoteVersion, '1.0.0')
         assert.ok(installCalls.at(-1).payloadLen > 0)
-        assert.equal(
-          remoteRpcCalls.some((c) => c.method === 'pluginManager/removeBundle' && c.args?.name === 'my-local-bundle'),
-          true,
-          'Must invoke live remote pluginManager/removeBundle before cross-source reinstall',
-        )
-        assert.equal(
-          remoteRpcCalls.some((c) => c.method === 'pluginManager/setBundleEnabled' && c.args?.name === 'my-local-bundle' && c.args?.enabled === true),
-          true,
-          'Must invoke live remote pluginManager/setBundleEnabled after CLI fallback install',
-        )
+        assert.equal(installCalls.at(-1).localLinkPrefix, 'link', 'Local link: plugins must be installed on the remote with link:')
+        assert.equal(remoteRpcCalls.length, 0, 'The local host must not call the remote PluginManager directly')
 
         // Case B: Installed on remote with version 1.9.0 <= local 2.0.0 -> deletes & reinstalls directly without confirmation
         const resNpm = await manager.syncPluginToHost('sync-box', { pluginName: 'demo-npm-bundle' })
